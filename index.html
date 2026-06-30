@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cookie Dash - เกมเรียนรู้ + บอท</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <h1>🍪 Cookie Dash</h1>
+      <p class="subtitle">เกม endless runner สำหรับเรียนรู้การทำบอท</p>
+    </header>
+
+    <div class="game-wrap">
+      <canvas id="game" width="900" height="400"></canvas>
+
+      <!-- Overlay หน้าจอเริ่ม / จบเกม -->
+      <div id="overlay" class="overlay">
+        <div class="overlay-card">
+          <h2 id="overlay-title">พร้อมวิ่งหรือยัง?</h2>
+          <p id="overlay-msg">กด <b>Space</b> หรือปุ่มด้านล่างเพื่อเริ่ม</p>
+          <button id="start-btn" class="btn btn-primary">เริ่มเล่น</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- แผงควบคุม -->
+    <div class="controls">
+      <div class="control-group">
+        <span class="label">โหมด</span>
+        <div class="mode-switch">
+          <button class="mode-btn active" data-mode="human">🧑 เล่นเอง</button>
+          <button class="mode-btn" data-mode="rule">🤖 Rule-based Bot</button>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <span class="label">การกระทำ</span>
+        <div class="action-btns">
+          <button id="jump-btn" class="btn">⬆️ กระโดด (Space / ↑)</button>
+          <button id="slide-btn" class="btn">⬇️ สไลด์ (↓)</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- แผงข้อมูล / debug ของบอท -->
+    <div class="stats">
+      <div class="stat"><span>คะแนน</span><b id="score">0</b></div>
+      <div class="stat"><span>ระยะทาง</span><b id="distance">0 m</b></div>
+      <div class="stat"><span>ความเร็ว</span><b id="speed">0</b></div>
+      <div class="stat"><span>เบสต์</span><b id="best">0</b></div>
+    </div>
+
+    <div id="bot-panel" class="bot-panel hidden">
+      <h3>🤖 สมองของบอท (Rule-based)</h3>
+      <p class="bot-explain">
+        บอทจะ "มอง" อุปสรรคที่ใกล้ที่สุดข้างหน้า แล้วตัดสินใจตามกฎ:
+        ถ้ากำลังจะชนสิ่งกีดขวางบนพื้น → กระโดด, ถ้าเป็นสิ่งกีดขวางบนอากาศ → สไลด์
+      </p>
+      <div class="bot-readout">
+        <div><span>อุปสรรคถัดไป</span><b id="bot-next">-</b></div>
+        <div><span>ระยะห่าง</span><b id="bot-dist">-</b></div>
+        <div><span>การตัดสินใจ</span><b id="bot-action">รอ...</b></div>
+      </div>
+      <label class="tune">
+        ระยะตัดสินใจ (reaction distance): <input type="range" id="react-range" min="60" max="320" value="150" />
+        <span id="react-val">150</span> px
+      </label>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+  <script src="bot.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>
