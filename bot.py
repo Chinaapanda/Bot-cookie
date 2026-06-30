@@ -7,12 +7,18 @@
   - หน้า Result (จบเกม)                    -> กด OK (และเริ่มใหม่ถ้าใส่ --loop)
 
 ใช้งาน:
-    python bot.py            # รันบอท (ต้องอยู่ในด่านเอง)
-    python bot.py --debug    # แสดงหน้าต่าง debug + คะแนนการตรวจจับ
-    python bot.py --loop     # ขับเองครบวงจรจากทุกหน้าจอ:
-                             #   หน้าเมนู -> เตรียม Double Coins -> Play
-                             #   ในด่าน  -> กระโดด/สไลด์ + Cookie Relay Boost
-                             #   จบเกม   -> OK -> วนกลับไปเริ่มใหม่
+    python bot.py                       # รันบอทโหมด react สด (ต้องอยู่ในด่านเอง)
+    python bot.py --debug               # แสดงหน้าต่าง debug + คะแนนการตรวจจับ
+    python bot.py --loop                # ขับเองครบวงจรจากทุกหน้าจอ:
+                                        #   หน้าเมนู -> เตรียม Double Coins -> Play
+                                        #   ในด่าน  -> react/หรือ pattern + Relay Boost
+                                        #   จบเกม   -> OK -> วนกลับไปเริ่มใหม่
+
+โหมด pattern (อัดจังหวะที่ดีไว้แล้วเล่นซ้ำ -- เก็บเหรียญสม่ำเสมอสุด):
+    python bot.py --record EP1          # อัด pattern ด่านนี้ (คุมด้วยคีย์บอร์ด)
+    python bot.py --play-pattern EP1    # เล่นซ้ำ 1 รอบ
+    python bot.py --loop --pattern EP1 --lead 80   # เล่นวนด้วย pattern อัตโนมัติ
+
 หยุดด้วย Ctrl+C (หรือกด q ในหน้าต่าง debug)
 """
 from __future__ import annotations
@@ -30,6 +36,7 @@ from auto_lobby import (
     is_lobby, is_buy, is_in_game, is_mystery_box, is_confirm,
     prepare_double_coins,
 )
+from pattern import record_pattern, play_pattern
 
 
 def draw_debug(img, result):
@@ -63,10 +70,26 @@ def main():
                         help="ถ้าตรวจเจอทั้งสองพร้อมกัน ให้เลือกอันไหนก่อน")
     parser.add_argument("--loop", action="store_true",
                         help="จบเกมแล้วกด OK + เตรียม Double Coins + เริ่มด่านใหม่อัตโนมัติ")
+    parser.add_argument("--record", metavar="NAME",
+                        help="อัด pattern ใหม่ (คุมเกมด้วยคีย์บอร์ด) แล้วออก")
+    parser.add_argument("--play-pattern", metavar="NAME",
+                        help="เล่นซ้ำ pattern 1 รอบแล้วออก")
+    parser.add_argument("--pattern", metavar="NAME",
+                        help="ใช้ pattern นี้เล่นช่วงอยู่ในด่าน (แทนการ react สด) -- ใช้คู่กับ --loop ได้")
+    parser.add_argument("--lead", type=int, default=0,
+                        help="ยิง action ของ pattern เร็วขึ้นกี่ ms (ชดเชย lag)")
     args = parser.parse_args()
 
     adb = ADBController()
     if not adb.connect():
+        return
+
+    # --- โหมดจัดการ pattern แบบครั้งเดียวจบ ---
+    if args.record:
+        record_pattern(adb, args.record)
+        return
+    if args.play_pattern:
+        play_pattern(adb, args.play_pattern, lead_ms=args.lead)
         return
 
     detector = build_detector()
@@ -75,6 +98,8 @@ def main():
     last_status_t = 0.0
     last_screen_t = 0.0
     unknown_since = 0.0
+    prev_jump = False          # สำหรับ trigger แบบ rising-edge (เลิกกระโดดรัว)
+    prev_slide = False
     SCREEN_COOLDOWN = 0.5
 
     print(f"[bot] เริ่มทำงาน (วิธีตรวจจับ={config.DETECT_METHOD}, fps≈{config.TARGET_FPS})")
@@ -125,32 +150,50 @@ def main():
 
             if handled:
                 unknown_since = 0.0
+                prev_jump = prev_slide = False
                 continue
 
             if is_in_game(img):
-                # --- อยู่ในด่าน: ตรวจอุปสรรคและสั่งกระโดด/สไลด์ ---
+                # --- อยู่ในด่าน ---
                 unknown_since = 0.0
+
+                if args.pattern:
+                    # เล่นตาม pattern ที่อัดไว้ (เก็บเหรียญสม่ำเสมอ ไม่พลาดจังหวะ)
+                    # บล็อกจนจบ 1 รอบ แล้วปล่อยให้ลูปไปเจอหน้า Result ต่อ
+                    print(f"[bot] เข้าด่าน -> เล่นตาม pattern '{args.pattern}' (lead={args.lead}ms)")
+                    play_pattern(adb, args.pattern, lead_ms=args.lead,
+                                 wait_anchor=False, verbose=True)
+                    prev_jump = prev_slide = False
+                    continue
+
+                # --- โหมด react สด: ตรวจอุปสรรคและสั่งกระโดด/สไลด์ ---
                 result = detector.detect(img)
-                if now - last_action_t >= config.ACTION_COOLDOWN_S:
+                cooled = now - last_action_t >= config.ACTION_COOLDOWN_S
+                # trigger เฉพาะ "ขอบขาขึ้น" (เพิ่งเริ่มเจออุปสรรค) เพื่อไม่ให้กดรัว
+                jump_edge = result.jump and not prev_jump
+                slide_edge = result.slide and not prev_slide
+                if cooled:
                     order = ("jump", "slide") if args.prefer == "jump" else ("slide", "jump")
                     for action in order:
-                        if action == "jump" and result.jump:
+                        if action == "jump" and jump_edge:
                             adb.jump()
                             last_action_t = now
                             print(f"[bot] JUMP  (score={result.jump_score:.3f}) "
                                   f"-> tap ({config.TAP_X},{config.TAP_Y})")
                             break
-                        if action == "slide" and result.slide:
+                        if action == "slide" and slide_edge:
                             adb.slide()
                             last_action_t = now
                             print(f"[bot] SLIDE (score={result.slide_score:.3f})")
                             break
+                prev_jump, prev_slide = result.jump, result.slide
                 if now - last_status_t >= 1.5:
                     last_status_t = now
                     print(f"[bot] เล่นอยู่... jump={result.jump_score:.3f} "
                           f"slide={result.slide_score:.3f} (threshold={config.MOTION_THRESHOLD})")
             else:
                 # --- ไม่ใช่หน้าที่รู้จัก และไม่ได้อยู่ในด่าน ---
+                prev_jump = prev_slide = False
                 if args.loop:
                     if unknown_since == 0.0:
                         unknown_since = now

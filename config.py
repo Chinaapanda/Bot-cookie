@@ -31,6 +31,10 @@ ADB_SERIAL = "127.0.0.1:5555"
 #   "minicap" = ใช้ minicap stream (เร็วกว่ามาก แต่ต้องติดตั้งเพิ่ม)
 CAPTURE_BACKEND = "adb"
 
+# จับภาพแบบ raw (RGBA ดิบ ไม่ต้อง encode/decode PNG) -- เร็วกว่าหลายเท่า
+# ถ้าจอเพี้ยน/decode พังให้ตั้งเป็น False เพื่อกลับไปใช้ PNG
+CAPTURE_RAW = True
+
 # ความถี่สูงสุดที่ลูปหลักจะวน (เฟรม/วินาที) -- ปรับตามความเร็วเครื่อง
 TARGET_FPS = 12
 

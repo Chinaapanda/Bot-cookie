@@ -58,7 +58,20 @@ class ADBController:
 
     # ---- capture ---------------------------------------------------------
     def screencap(self) -> np.ndarray:
-        """จับภาพหน้าจอ คืนเป็น BGR numpy array (ใช้กับ OpenCV)"""
+        """จับภาพหน้าจอ คืนเป็น BGR numpy array (ใช้กับ OpenCV)
+
+        ถ้า config.CAPTURE_RAW = True จะดึง pixel ดิบ (RGBA) ตรง ๆ ไม่ต้อง
+        encode/decode PNG -- เร็วกว่ามาก (สำคัญกับเกมที่ต้องตอบสนองไว)
+        ถ้า raw ล้มเหลวจะ fallback กลับไปใช้ PNG อัตโนมัติ
+        """
+        if getattr(config, "CAPTURE_RAW", False):
+            try:
+                return self._screencap_raw()
+            except Exception:
+                pass
+        return self._screencap_png()
+
+    def _screencap_png(self) -> np.ndarray:
         raw = self._run(["exec-out", "screencap", "-p"]).stdout
         if not raw:
             raise RuntimeError("screencap ว่างเปล่า - ตรวจการเชื่อมต่อ ADB")
@@ -66,6 +79,25 @@ class ADBController:
         if img is None:
             raise RuntimeError("decode ภาพ screencap ไม่สำเร็จ")
         return img
+
+    def _screencap_raw(self) -> np.ndarray:
+        """ดึง framebuffer ดิบจาก `screencap` (ไม่มี -p)
+
+        รูปแบบ: header [width(4), height(4), format(4), (colorspace(4) บน Android 9+)]
+        แบบ little-endian ตามด้วย pixel RGBA = width*height*4 ไบต์
+        เราหาขนาด header จากผลต่างความยาวจริง จึงรองรับทั้ง header 12 และ 16 ไบต์
+        """
+        raw = self._run(["exec-out", "screencap"]).stdout
+        if not raw or len(raw) < 16:
+            raise RuntimeError("screencap raw ว่างเปล่า")
+        w = int.from_bytes(raw[0:4], "little")
+        h = int.from_bytes(raw[4:8], "little")
+        expected = w * h * 4
+        header = len(raw) - expected
+        if not (0 < w <= 10000 and 0 < h <= 10000) or header < 0:
+            raise RuntimeError(f"screencap raw header ผิดปกติ (w={w} h={h} len={len(raw)})")
+        arr = np.frombuffer(raw[header:header + expected], np.uint8).reshape(h, w, 4)
+        return cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
 
     # ---- input -----------------------------------------------------------
     def tap(self, x: int, y: int) -> None:
@@ -81,6 +113,23 @@ class ADBController:
              str(int(x2)), str(int(y2)), str(int(duration_ms))],
             capture=False,
         )
+
+    # ---- touch แบบแยก down/up (กดค้างจริง ใช้ input motionevent) ----------
+    def touch_down(self, x: int, y: int) -> None:
+        """แตะลง (นิ้วลง) ค้างไว้ จนกว่าจะเรียก touch_up"""
+        self._run(["shell", "input", "motionevent", "DOWN", str(int(x)), str(int(y))],
+                  capture=False)
+
+    def touch_up(self, x: int, y: int) -> None:
+        """ยกนิ้วขึ้น (ปล่อยที่กดค้างไว้)"""
+        self._run(["shell", "input", "motionevent", "UP", str(int(x)), str(int(y))],
+                  capture=False)
+
+    def hold(self, x: int, y: int, duration_ms: int) -> None:
+        """กดค้างที่จุดเดียวเป็นเวลา duration_ms (down -> รอ -> up)"""
+        self.touch_down(x, y)
+        time.sleep(max(duration_ms, 0) / 1000.0)
+        self.touch_up(x, y)
 
     # ---- game actions ----------------------------------------------------
     def jump(self) -> None:
