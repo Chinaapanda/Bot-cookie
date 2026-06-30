@@ -9,6 +9,10 @@ env/
 # ภาพ debug / ที่จับระหว่างทดสอบ (ไม่จำเป็นต่อการรัน)
 shots/
 
+# เว็บเกม Cookie Dash (คนละโปรเจกต์กับบอท Python)
+index.html
+style.css
+
 # OS / editor
 Thumbs.db
 .DS_Store
