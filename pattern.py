@@ -40,6 +40,10 @@ PATTERN_DIR = config.BASE_DIR / "patterns"
 PATTERN_DIR.mkdir(exist_ok=True)
 
 
+class GameOver(Exception):
+    """จบเกมก่อน pattern เล่นครบ (เจอหน้า Result)"""
+
+
 # ---------------------------------------------------------------------------
 # helper
 # ---------------------------------------------------------------------------
@@ -178,16 +182,22 @@ def _record_global(adb, name: str) -> dict:
             t = round(time.time() - t0, 3)
             pt = _point(action)
             held[e.scan_code] = (t, action, pt)
-            adb.touch_down(*pt)  # นิ้วลง = เริ่มกดค้างจริงในเกมทันที
+            if action == "slide":
+                adb.touch_down(*pt)  # มุด = กดค้างจริง (ปล่อยตอน key up)
+            else:  # jump = แตะครั้งเดียว (อยากดับเบิลก็กดอีกที)
+                adb.tap(*pt)
+                events.append({"t": t, "a": "jump"})
+                print(f"  {t:6.2f}s  jump")
         else:  # KEY_UP
             info = held.pop(e.scan_code, None)
             if info is None:
                 return
             t_down, action, pt = info
-            adb.touch_up(*pt)    # ยกนิ้ว = ปล่อย
-            dur = max(int(round((time.time() - t0 - t_down) * 1000)), 1)
-            events.append({"t": t_down, "a": action, "dur": dur})
-            print(f"  {t_down:6.2f}s  {action}  (ค้าง {dur}ms)")
+            if action == "slide":
+                adb.touch_up(*pt)    # ยกนิ้ว = เลิกมุด
+                dur = max(int(round((time.time() - t0 - t_down) * 1000)), 1)
+                events.append({"t": t_down, "a": "slide", "dur": dur})
+                print(f"  {t_down:6.2f}s  slide  (ค้าง {dur}ms)")
 
     keyboard.hook(on_event)
 
@@ -222,11 +232,12 @@ def _record_global(adb, name: str) -> dict:
         stop["reason"] = "Ctrl+C"
     finally:
         keyboard.unhook_all()
-        # ปล่อยปุ่มที่ยังกดค้างอยู่ตอนหยุด (กันนิ้วค้างในเกม + บันทึกให้ครบ)
+        # ปล่อยปุ่มสไลด์ที่ยังกดค้างอยู่ตอนหยุด (กันนิ้วค้าง + บันทึกให้ครบ)
         for t_down, action, pt in list(held.values()):
-            adb.touch_up(*pt)
-            dur = max(int(round((time.time() - t0 - t_down) * 1000)), 1)
-            events.append({"t": t_down, "a": action, "dur": dur})
+            if action == "slide":
+                adb.touch_up(*pt)
+                dur = max(int(round((time.time() - t0 - t_down) * 1000)), 1)
+                events.append({"t": t_down, "a": "slide", "dur": dur})
         held.clear()
 
     events.sort(key=lambda ev: ev["t"])
@@ -285,19 +296,17 @@ def _build_timeline(events: list[dict], base: float = 0.0) -> list[tuple]:
         if a == "relay":
             continue
         t = ev["t"] - base
-        if a == "double":  # รองรับ pattern เก่า: double jump = แตะสองที
+        if a == "slide":
+            pt = _point("slide")
+            dur = ev.get("dur") or config.SLIDE_HOLD_MS
+            tl.append((t, "down", pt, "slide", dur))
+            tl.append((t + dur / 1000.0, "up", pt, "slide", dur))
+        elif a == "double":  # รองรับ pattern เก่า: double = แตะสองที
             pt = _point("jump")
-            tl.append((t, "down", pt, "double", 0))
-            tl.append((t + 0.05, "up", pt, "double", 0))
-            tl.append((t + 0.11, "down", pt, "double", 0))
-            tl.append((t + 0.16, "up", pt, "double", 0))
-            continue
-        pt = _point(a)
-        dur = ev.get("dur")
-        if dur is None:
-            dur = config.SLIDE_HOLD_MS if a == "slide" else _DEFAULT_TAP_MS
-        tl.append((t, "down", pt, a, dur))
-        tl.append((t + dur / 1000.0, "up", pt, a, dur))
+            tl.append((t, "tap", pt, "double", 0))
+            tl.append((t + 0.12, "tap", pt, "double", 0))
+        else:  # jump = แตะครั้งเดียว
+            tl.append((t, "tap", _point("jump"), "jump", 0))
     tl.sort(key=lambda x: x[0])
     return tl
 
@@ -323,21 +332,66 @@ def _split_segments(events: list[dict]) -> list[tuple]:
     return segments
 
 
-def _play_timeline(adb, timeline, t0, lead, verbose) -> None:
+def _sleep_until(adb, target_t, t0, lead, watch_relay: bool, verbose: bool) -> None:
+    """รอจนถึงเวลา target แต่เช็ค Relay Boost / หน้า Result ระหว่างทาง"""
+    from auto_lobby import is_relay_boost, is_result, RELAY_TAP
+
+    relay_at = 0.0
+    while True:
+        now = time.time()
+        delay = (t0 + target_t - lead) - now
+        if delay <= 0:
+            break
+        if now - relay_at > 0.8:
+            try:
+                img = adb.screencap()
+                if is_result(img):
+                    if verbose:
+                        print("  -> หน้า Result (จบเกม) -> หยุด pattern")
+                    raise GameOver()
+                if watch_relay and is_relay_boost(img):
+                    adb.tap(*RELAY_TAP)
+                    relay_at = now
+                    if verbose:
+                        print("  -> Relay Boost (ระหว่างเล่น pattern)")
+                    time.sleep(0.5)
+                    continue
+            except GameOver:
+                raise
+            except Exception:
+                pass
+        time.sleep(min(delay, 0.12))
+
+
+def _play_timeline(adb, timeline, t0, lead, verbose, watch_relay: bool = True) -> None:
     for tt, typ, pt, a, dur in timeline:
-        delay = (t0 + tt - lead) - time.time()
-        if delay > 0:
-            time.sleep(delay)
-        if typ == "down":
+        _sleep_until(adb, tt, t0, lead, watch_relay, verbose)
+        if typ == "tap":
+            adb.tap(*pt)
+            if verbose:
+                print(f"  {tt:6.2f}s -> {a}")
+        elif typ == "down":
             adb.touch_down(*pt)
             if verbose:
                 print(f"  {tt:6.2f}s -> {a} (ค้าง {dur}ms)")
-        else:
+        else:  # up
             adb.touch_up(*pt)
+        # เช็คจบเกมหลัง action ด้วย (ตอบสนองเร็วขึ้น)
+        try:
+            from auto_lobby import is_result
+            if is_result(adb.screencap()):
+                if verbose:
+                    print("  -> หน้า Result (จบเกม) -> หยุด pattern")
+                raise GameOver()
+        except GameOver:
+            raise
+        except Exception:
+            pass
 
 
 def play_pattern(adb, name, lead_ms: int = 0, wait_anchor: bool = True,
-                 verbose: bool = True) -> bool:
+                 verbose: bool = True, watch_relay: bool = True) -> str | bool:
+    """เล่น pattern คืน 'done' | 'game_over' | False (ล้มเหลว)"""
     from auto_lobby import is_relay_boost, RELAY_TAP
 
     data = load_pattern(name)
@@ -360,27 +414,34 @@ def play_pattern(adb, name, lead_ms: int = 0, wait_anchor: bool = True,
         print(f"[play] เล่นตาม pattern '{data.get('name', name)}' "
               f"({len(events) - n_relay} จังหวะ, {n_relay} จุด sync, lead={lead_ms}ms)")
 
+    status = "done"
     try:
         for base, evs, ends_with_relay in segments:
             timeline = _build_timeline(evs, base=base)
             t0 = time.time()
-            _play_timeline(adb, timeline, t0, lead, verbose)
-            if ends_with_relay:
-                # รอจอ Relay Boost โผล่จริง แล้วแตะ -> รีเซ็ตนาฬิกาให้ช่วงถัดไป
+            try:
+                _play_timeline(adb, timeline, t0, lead, verbose, watch_relay)
+            except GameOver:
+                status = "game_over"
+                break
+            if ends_with_relay and status == "done":
                 if verbose:
                     print("  ...รอ Relay Boost เพื่อ re-sync")
                 got = _wait_for(adb, is_relay_boost, timeout=10.0)
                 adb.tap(*RELAY_TAP)
                 if verbose:
                     print(f"  -> แตะ Relay Boost ({'เจอจอ' if got else 'timeout เดาแตะ'})")
-                time.sleep(0.6)  # เผื่อเกมเล่นต่อ
+                time.sleep(0.6)
     finally:
         adb.touch_up(*_point("jump"))
         adb.touch_up(*_point("slide"))
 
     if verbose:
-        print("[play] จบ pattern")
-    return True
+        if status == "game_over":
+            print("[play] หยุด pattern กลางคัน (จบเกม)")
+        else:
+            print("[play] จบ pattern")
+    return status
 
 
 def _wait_for(adb, pred, timeout=10.0, interval=0.2) -> bool:
@@ -410,6 +471,7 @@ def main():
     p_play.add_argument("name", help="ชื่อ pattern")
     p_play.add_argument("--lead", type=int, default=0, help="ยิง action เร็วขึ้นกี่ ms (ชดเชย lag)")
     p_play.add_argument("--no-wait", action="store_true", help="ไม่ต้องรอ anchor เริ่มเล่นทันที")
+    p_play.add_argument("--no-prep", action="store_true", help="ไม่เตรียม lobby/Play ก่อนเล่น")
 
     sub.add_parser("list", help="ดูรายการ pattern")
 
@@ -433,6 +495,15 @@ def main():
     if args.cmd == "record":
         record_pattern(adb, args.name, wait_anchor=not args.no_wait)
     elif args.cmd == "play":
+        if not getattr(args, "no_prep", False):
+            from auto_lobby import is_in_game, prepare_double_coins
+            try:
+                if not is_in_game(adb.screencap()):
+                    print("[play] ยังไม่อยู่ในด่าน -> เตรียม Double Coins + กด Play")
+                    prepare_double_coins(adb, want_play=True)
+                    time.sleep(2.5)
+            except Exception as e:
+                print(f"[play] เตรียม lobby ล้มเหลว: {e}")
         play_pattern(adb, args.name, lead_ms=args.lead, wait_anchor=not args.no_wait)
 
 

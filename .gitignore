@@ -18,3 +18,11 @@ Thumbs.db
 .DS_Store
 .idea/
 .vscode/
+
+# การตั้งค่าผู้ใช้ (ไม่ commit)
+settings.json
+
+# build output
+build/
+dist/
+*.spec.bak

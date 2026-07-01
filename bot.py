@@ -29,6 +29,7 @@ import time
 import cv2
 
 import config
+from settings import apply_user_settings
 from adb_controller import ADBController
 from detector import build_detector, crop, roi_to_pixels
 from auto_lobby import (
@@ -64,6 +65,7 @@ def draw_debug(img, result):
 
 
 def main():
+    apply_user_settings()
     parser = argparse.ArgumentParser(description="Cookie Run Classic auto-play bot (LDPlayer/ADB)")
     parser.add_argument("--debug", action="store_true", help="แสดงหน้าต่าง debug")
     parser.add_argument("--prefer", choices=["jump", "slide"], default="jump",
@@ -73,7 +75,9 @@ def main():
     parser.add_argument("--record", metavar="NAME",
                         help="อัด pattern ใหม่ (คุมเกมด้วยคีย์บอร์ด) แล้วออก")
     parser.add_argument("--play-pattern", metavar="NAME",
-                        help="เล่นซ้ำ pattern 1 รอบแล้วออก")
+                        help="เตรียม lobby+Play แล้วเล่น pattern 1 รอบ (จัดการ Relay ให้ด้วย)")
+    parser.add_argument("--no-prep", action="store_true",
+                        help="ไม่เตรียม lobby/Play ก่อนเล่น pattern (ต้องอยู่ในด่านแล้ว)")
     parser.add_argument("--pattern", metavar="NAME",
                         help="ใช้ pattern นี้เล่นช่วงอยู่ในด่าน (แทนการ react สด) -- ใช้คู่กับ --loop ได้")
     parser.add_argument("--lead", type=int, default=0,
@@ -88,8 +92,27 @@ def main():
     if args.record:
         record_pattern(adb, args.record)
         return
-    if args.play_pattern:
-        play_pattern(adb, args.play_pattern, lead_ms=args.lead)
+    if args.play_pattern and args.loop:
+        # --play-pattern + --loop = เล่นวนครบวงจร (รวมจบเกมกลับ lobby)
+        args.pattern = args.play_pattern
+    elif args.play_pattern:
+        if not args.no_prep:
+            try:
+                if not is_in_game(adb.screencap()):
+                    print("[bot] ยังไม่อยู่ในด่าน -> เตรียม Double Coins + กด Play")
+                    prepare_double_coins(adb, want_play=True)
+                    time.sleep(2.5)
+            except Exception as e:  # noqa: BLE001
+                print(f"[bot] เตรียม lobby ล้มเหลว: {e}")
+        status = play_pattern(adb, args.play_pattern, lead_ms=args.lead, watch_relay=True)
+        if status == "game_over":
+            try:
+                time.sleep(0.8)
+                if is_result(adb.screencap()):
+                    print("[bot] หน้า Result -> กด OK")
+                    adb.tap(*RESULT_OK)
+            except Exception:
+                pass
         return
 
     detector = build_detector()
@@ -158,12 +181,13 @@ def main():
                 unknown_since = 0.0
 
                 if args.pattern:
-                    # เล่นตาม pattern ที่อัดไว้ (เก็บเหรียญสม่ำเสมอ ไม่พลาดจังหวะ)
-                    # บล็อกจนจบ 1 รอบ แล้วปล่อยให้ลูปไปเจอหน้า Result ต่อ
                     print(f"[bot] เข้าด่าน -> เล่นตาม pattern '{args.pattern}' (lead={args.lead}ms)")
-                    play_pattern(adb, args.pattern, lead_ms=args.lead,
-                                 wait_anchor=False, verbose=True)
+                    status = play_pattern(adb, args.pattern, lead_ms=args.lead,
+                                          wait_anchor=False, verbose=True)
                     prev_jump = prev_slide = False
+                    if status == "game_over":
+                        # pattern หยุดกลางคัน -> ลูปจัดการ Result/กล่อง/lobby ต่อ
+                        continue
                     continue
 
                 # --- โหมด react สด: ตรวจอุปสรรคและสั่งกระโดด/สไลด์ ---
