@@ -11,6 +11,7 @@ SETTINGS_FILE = app_dir() / "settings.json"
 # คีย์ที่ผู้ใช้ปรับได้ผ่าน GUI / settings.json
 USER_KEYS = (
     "ADB_PATH", "ADB_SERIAL", "TAP_X", "TAP_Y", "SLIDE_X", "SLIDE_Y",
+    "ROI_JUMP", "ROI_SLIDE", "ROI_PLAYER",
     "TARGET_FPS", "CAPTURE_RAW", "DETECT_METHOD", "MOTION_THRESHOLD",
     "default_pattern", "default_lead", "auto_check_update",
 )
@@ -38,7 +39,10 @@ def apply_user_settings() -> None:
     data = load()
     for key in USER_KEYS:
         if key in data:
-            setattr(config, key, data[key])
+            val = data[key]
+            if key.startswith("ROI_") and isinstance(val, list):
+                val = tuple(val)
+            setattr(config, key, val)
 
 
 def get(key: str, default=None):
@@ -62,6 +66,9 @@ def to_dict() -> dict:
         "TAP_Y": config.TAP_Y,
         "SLIDE_X": config.SLIDE_X,
         "SLIDE_Y": config.SLIDE_Y,
+        "ROI_JUMP": config.ROI_JUMP,
+        "ROI_SLIDE": config.ROI_SLIDE,
+        "ROI_PLAYER": config.ROI_PLAYER,
         "TARGET_FPS": config.TARGET_FPS,
         "CAPTURE_RAW": config.CAPTURE_RAW,
         "DETECT_METHOD": config.DETECT_METHOD,

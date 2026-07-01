@@ -15,7 +15,9 @@ a = Analysis(
         (str(root / 'templates'), 'templates'),
     ] if (root / 'templates').exists() else [],
     hiddenimports=[
-        'cv2', 'numpy', 'PIL', 'keyboard', 'settings', 'updater', 'paths', 'version',
+        'cv2', 'numpy', 'PIL', 'keyboard', 'customtkinter',
+        'gui', 'gui.main_window', 'gui.calibrate_page', 'gui.services', 'gui.components', 'gui.theme',
+        'settings', 'updater', 'paths', 'version',
         'bot', 'pattern', 'auto_lobby', 'adb_controller', 'detector', 'config',
     ],
     hookspath=[],

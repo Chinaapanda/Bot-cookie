@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 
 import config
@@ -62,6 +63,71 @@ def load_pattern(name) -> dict:
 
 def list_patterns() -> list[str]:
     return sorted(p.stem for p in PATTERN_DIR.glob("*.json"))
+
+
+def sanitize_name(name: str) -> str:
+    """ชื่อ pattern ที่ปลอดภัย (ใช้เป็นชื่อไฟล์)"""
+    name = name.strip()
+    name = re.sub(r'[<>:"/\\|?*]', "", name)
+    name = re.sub(r"\s+", "_", name)
+    return name
+
+
+def create_pattern(name: str) -> Path:
+    """สร้าง pattern เปล่าใหม่"""
+    name = sanitize_name(name)
+    if not name:
+        raise ValueError("ชื่อ pattern ว่างเปล่า")
+    p = pattern_path(name)
+    if p.exists():
+        raise FileExistsError(f"มี pattern '{name}' อยู่แล้ว")
+    data = {
+        "name": name,
+        "duration": 0,
+        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "events": [],
+    }
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return p
+
+
+def rename_pattern(old_name: str, new_name: str) -> Path:
+    """เปลี่ยนชื่อ pattern (ย้ายไฟล์ + อัปเดต name ใน JSON)"""
+    old_name = sanitize_name(old_name)
+    new_name = sanitize_name(new_name)
+    if not old_name or not new_name:
+        raise ValueError("ชื่อ pattern ว่างเปล่า")
+    if old_name == new_name:
+        return pattern_path(old_name)
+    src = pattern_path(old_name)
+    dst = pattern_path(new_name)
+    if not src.exists():
+        raise FileNotFoundError(f"ไม่พบ pattern: {old_name}")
+    if dst.exists():
+        raise FileExistsError(f"มี pattern '{new_name}' อยู่แล้ว")
+    data = json.loads(src.read_text(encoding="utf-8"))
+    data["name"] = new_name
+    dst.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    src.unlink()
+    # อัปเดต default_pattern ใน settings ถ้าตรงกับชื่อเดิม
+    try:
+        from settings import load, save
+        cfg = load()
+        if cfg.get("default_pattern") == old_name:
+            cfg["default_pattern"] = new_name
+            save(cfg)
+    except Exception:
+        pass
+    return dst
+
+
+def delete_pattern(name: str) -> None:
+    """ลบ pattern"""
+    name = sanitize_name(name)
+    p = pattern_path(name)
+    if not p.exists():
+        raise FileNotFoundError(f"ไม่พบ pattern: {name}")
+    p.unlink()
 
 
 def _wait_in_game(adb, timeout: float = 60.0) -> bool:
@@ -102,6 +168,8 @@ _SCAN_ACTION = {
 
 # ระยะกดค้างเริ่มต้น (ms) เผื่อ pattern เก่าที่ไม่มีข้อมูล dur
 _DEFAULT_TAP_MS = 60
+# กันบันทึกกระโดดซ้ำจากคีย์บอร์ดเด้ง / ส่งซ้ำเร็วเกินไป
+_JUMP_DEBOUNCE_S = 0.12
 
 
 def _point(action: str):
@@ -166,8 +234,10 @@ def _record_global(adb, name: str) -> dict:
     events: list[dict] = []
     held: dict[int, tuple] = {}   # scan code -> (t_down, action, point) ที่กดค้างอยู่
     stop = {"v": False, "reason": ""}
+    last_jump_t = -1.0
 
     def on_event(e):
+        nonlocal last_jump_t
         action = _SCAN_ACTION.get(e.scan_code)
         if action is None:
             return
@@ -181,11 +251,15 @@ def _record_global(adb, name: str) -> dict:
                 return
             t = round(time.time() - t0, 3)
             pt = _point(action)
-            held[e.scan_code] = (t, action, pt)
             if action == "slide":
+                held[e.scan_code] = (t, action, pt)
                 adb.touch_down(*pt)  # มุด = กดค้างจริง (ปล่อยตอน key up)
             else:  # jump = แตะครั้งเดียว (อยากดับเบิลก็กดอีกที)
-                adb.tap(*pt)
+                if t - last_jump_t < _JUMP_DEBOUNCE_S:
+                    return
+                last_jump_t = t
+                held[e.scan_code] = (t, action, pt)
+                adb.single_tap(*pt)
                 events.append({"t": t, "a": "jump"})
                 print(f"  {t:6.2f}s  jump")
         else:  # KEY_UP
@@ -199,7 +273,8 @@ def _record_global(adb, name: str) -> dict:
                 events.append({"t": t_down, "a": "slide", "dur": dur})
                 print(f"  {t_down:6.2f}s  slide  (ค้าง {dur}ms)")
 
-    keyboard.hook(on_event)
+    # suppress=True กันคีย์ W/S ส่งเข้า LDPlayer ซ้ำ (ADB แตะให้แล้ว)
+    keyboard.hook(on_event, suppress=True)
 
     last_save = 0.0
     last_check = 0.0
@@ -303,10 +378,10 @@ def _build_timeline(events: list[dict], base: float = 0.0) -> list[tuple]:
             tl.append((t + dur / 1000.0, "up", pt, "slide", dur))
         elif a == "double":  # รองรับ pattern เก่า: double = แตะสองที
             pt = _point("jump")
-            tl.append((t, "tap", pt, "double", 0))
-            tl.append((t + 0.12, "tap", pt, "double", 0))
+            tl.append((t, "jump", pt, "double", 0))
+            tl.append((t + 0.08, "jump", pt, "double", 0))
         else:  # jump = แตะครั้งเดียว
-            tl.append((t, "tap", _point("jump"), "jump", 0))
+            tl.append((t, "jump", _point("jump"), "jump", 0))
     tl.sort(key=lambda x: x[0])
     return tl
 
@@ -366,8 +441,8 @@ def _sleep_until(adb, target_t, t0, lead, watch_relay: bool, verbose: bool) -> N
 def _play_timeline(adb, timeline, t0, lead, verbose, watch_relay: bool = True) -> None:
     for tt, typ, pt, a, dur in timeline:
         _sleep_until(adb, tt, t0, lead, watch_relay, verbose)
-        if typ == "tap":
-            adb.tap(*pt)
+        if typ == "jump":
+            adb.single_tap(*pt)
             if verbose:
                 print(f"  {tt:6.2f}s -> {a}")
         elif typ == "down":
@@ -433,7 +508,7 @@ def play_pattern(adb, name, lead_ms: int = 0, wait_anchor: bool = True,
                     print(f"  -> แตะ Relay Boost ({'เจอจอ' if got else 'timeout เดาแตะ'})")
                 time.sleep(0.6)
     finally:
-        adb.touch_up(*_point("jump"))
+        # ปล่อยเฉพาะสไลด์ที่อาจค้าง — อย่า touch_up จุดกระโดด (ทำให้กระโดดซ้ำ)
         adb.touch_up(*_point("slide"))
 
     if verbose:

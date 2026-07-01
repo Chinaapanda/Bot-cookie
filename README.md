@@ -54,6 +54,7 @@ GitHub Actions จะ build `.zip` และสร้าง Release ให้อ
 | `diagnose.py` | วัดค่า motion + เซฟภาพพร้อมกรอบโซนไว้ตรวจสอบ |
 | `calibrate.py` | เครื่องมือช่วยหาพิกัด/โซน และเซฟ template |
 | `app.py` | **แอป GUI หลัก** (เปิดด้วย run.bat / CookieRunBot.exe) |
+| `gui/` | หน้าต่าง CustomTkinter — ภาพรวม, ควบคุม, Patterns, ตั้งค่า, Log |
 | `updater.py` | ตรวจและติดตั้งอัปเดตจาก GitHub |
 | `settings.py` | การตั้งค่าผู้ใช้ (settings.json) |
 | `version.py` | เลขเวอร์ชันแอป |

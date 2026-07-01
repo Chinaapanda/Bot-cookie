@@ -131,14 +131,24 @@ class ADBController:
         time.sleep(max(duration_ms, 0) / 1000.0)
         self.touch_up(x, y)
 
+    def single_tap(self, x: int, y: int, hold_ms: int = 25) -> None:
+        """แตะครั้งเดียว (กระโดด) — ใช้ motionevent ไม่ใช้ input tap
+
+        หลีกเลี่ยงการผสม input tap กับ motionevent บน LDPlayer
+        ที่อาจทำให้เกมนับเป็นกระโดด 2 ครั้ง (double jump)
+        """
+        self.touch_down(x, y)
+        time.sleep(max(hold_ms, 1) / 1000.0)
+        self.touch_up(x, y)
+
     # ---- game actions ----------------------------------------------------
     def jump(self) -> None:
-        self.tap(config.TAP_X, config.TAP_Y)
+        self.single_tap(config.TAP_X, config.TAP_Y)
 
     def double_jump(self) -> None:
-        self.tap(config.TAP_X, config.TAP_Y)
-        time.sleep(0.06)
-        self.tap(config.TAP_X, config.TAP_Y)
+        self.single_tap(config.TAP_X, config.TAP_Y)
+        time.sleep(0.08)
+        self.single_tap(config.TAP_X, config.TAP_Y)
 
     def slide(self) -> None:
         # สไลด์ = ปัดลง/กดค้างอยู่กับที่

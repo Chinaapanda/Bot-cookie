@@ -154,5 +154,12 @@ def main():
     cv2.destroyAllWindows()
 
 
-if __name__ == "__main__":
+def run_calibrate():
+    """เปิดหน้าต่าง calibrate แบบ OpenCV (เรียกจาก GUI หรือ CLI)"""
+    from settings import apply_user_settings
+    apply_user_settings()
     main()
+
+
+if __name__ == "__main__":
+    run_calibrate()
