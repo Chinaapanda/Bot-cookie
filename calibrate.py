@@ -26,6 +26,7 @@ import cv2
 import config
 from adb_controller import ADBController
 from detector import roi_to_pixels
+from paths import app_dir
 
 WIN = "calibrate (q=ออก)"
 
@@ -70,7 +71,7 @@ def _save_template():
         print("  กรอบเล็กเกินไป ยกเลิก")
         return
     crop = img[y1:y2, x1:x2]
-    folder = config.TEMPLATE_DIR / state["tpl_kind"]
+    folder = (app_dir() / "templates" / state["tpl_kind"])
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{int(time.time())}.png"
     cv2.imwrite(str(path), crop)

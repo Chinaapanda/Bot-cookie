@@ -5,7 +5,7 @@
 import sys
 from pathlib import Path
 
-from paths import app_dir
+from paths import app_dir, is_frozen, templates_dir
 
 # คอนโซล Windows มักเป็น cp1252 ทำให้พิมพ์ภาษาไทยไม่ได้ -> บังคับเป็น UTF-8
 # line_buffering=True เพื่อให้ log โผล่ทันทีแม้ตอน redirect ลงไฟล์
@@ -95,9 +95,10 @@ ACTION_COOLDOWN_S = 0.25
 # โฟลเดอร์
 # ---------------------------------------------------------------------------
 BASE_DIR = app_dir()
-TEMPLATE_DIR = BASE_DIR / "templates"
+TEMPLATE_DIR = templates_dir()
 SHOTS_DIR = BASE_DIR / "shots"
 PATTERN_DIR = BASE_DIR / "patterns"
-TEMPLATE_DIR.mkdir(exist_ok=True)
 SHOTS_DIR.mkdir(exist_ok=True)
 PATTERN_DIR.mkdir(exist_ok=True)
+if not is_frozen():
+    TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)

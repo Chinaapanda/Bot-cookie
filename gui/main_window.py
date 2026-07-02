@@ -658,31 +658,48 @@ class CookieRunApp(ctk.CTk):
         threading.Thread(target=self._check_update_worker, args=(True,), daemon=True).start()
 
     def _check_update_worker(self, show_no_update: bool):
-        from updater import apply_update, check_for_update, restart_app
+        from updater import apply_update, check_for_update, fetch_release_info, restart_app
         self._log("[update] กำลังตรวจสอบ...")
         try:
+            remote = fetch_release_info()
             info = check_for_update()
         except Exception as e:
             self._log(f"[update] ตรวจไม่ได้: {e}")
             if show_no_update:
                 self.after(0, lambda: messagebox.showerror("อัปเดต", str(e)))
             return
-        if info is None:
-            self._log(f"[update] เป็นเวอร์ชันล่าสุด v{VERSION}")
+        if remote is None:
+            self._log("[update] เชื่อมต่อ GitHub ไม่ได้")
             if show_no_update:
-                self.after(0, lambda: messagebox.showinfo("อัปเดต", f"เป็นเวอร์ชันล่าสุด v{VERSION}"))
+                self.after(0, lambda: messagebox.showerror(
+                    "อัปเดต", "เชื่อมต่อ GitHub ไม่ได้ — ตรวจอินเทอร์เน็ต"))
             return
-        self._log(f"[update] พบ v{info.latest}")
+        if info is None:
+            self._log(f"[update] เป็นเวอร์ชันล่าสุด v{VERSION} (release v{remote.latest})")
+            if show_no_update:
+                self.after(0, lambda: messagebox.showinfo(
+                    "อัปเดต",
+                    f"เป็นเวอร์ชันล่าสุดแล้ว\n\nปัจจุบัน: v{VERSION}\nRelease: v{remote.latest}"))
+            return
+        self._log(f"[update] พบ v{info.latest} (ปัจจุบัน v{info.current})")
 
         def ask():
-            msg = f"มีเวอร์ชันใหม่ v{info.latest}\n(ปัจจุบัน v{info.current})\n\nอัปเดตเลยไหม?"
+            msg = (f"มีเวอร์ชันใหม่ v{info.latest}\n"
+                   f"(ปัจจุบัน v{info.current})\n\nอัปเดตเลยไหม?")
             if messagebox.askyesno("อัปเดต", msg):
+                from paths import is_frozen
                 self._log("[update] กำลังอัปเดต...")
+                if is_frozen():
+                    self._log("[update] แอปจะปิดแล้วติดตั้งอัตโนมัติ...")
+                    messagebox.showinfo(
+                        "อัปเดต",
+                        "กำลังดาวน์โหลดและติดตั้ง...\n"
+                        "แอปจะปิดเอง แล้วเปิดใหม่อัตโนมัติ")
                 ok = apply_update(info, log=self._log)
-                if ok:
+                if ok and not is_frozen():
                     messagebox.showinfo("อัปเดต", "สำเร็จ! แอปจะรีสตาร์ท")
                     restart_app()
-                else:
+                elif not ok and not is_frozen():
                     messagebox.showerror("อัปเดต", "ล้มเหลว — ดู Log")
         self.after(0, ask)
 

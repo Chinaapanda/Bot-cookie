@@ -48,10 +48,13 @@ DEBUG = False
 
 def _load(name):
     p = STATE_DIR / f"{name}.png"
-    t = cv2.imread(str(p))
-    if t is None:
+    if not p.is_file():
         raise FileNotFoundError(
             f"ไม่พบ template {p} -- รัน `python make_templates.py` ก่อน")
+    t = cv2.imread(str(p), cv2.IMREAD_COLOR)
+    if t is None:
+        raise FileNotFoundError(
+            f"อ่าน template ไม่ได้ {p} -- ไฟล์เสียหายหรือ path ผิด")
     return t
 
 
