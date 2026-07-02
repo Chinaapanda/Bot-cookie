@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import threading
 import time
 
 import config
@@ -130,11 +131,18 @@ def delete_pattern(name: str) -> None:
     p.unlink()
 
 
-def _wait_in_game(adb, timeout: float = 60.0) -> bool:
+def _stopped(stop_event: threading.Event | None) -> bool:
+    return stop_event is not None and stop_event.is_set()
+
+
+def _wait_in_game(adb, timeout: float = 60.0,
+                  stop_event: threading.Event | None = None) -> bool:
     """รอจน 'เข้าด่าน' (is_in_game) เป็นจริง = จุด anchor เริ่มจับเวลา"""
     from auto_lobby import is_in_game  # import ช้าเพื่อเลี่ยง circular/โหลด template เร็วเกิน
     t0 = time.time()
     while time.time() - t0 < timeout:
+        if _stopped(stop_event):
+            return False
         try:
             if is_in_game(adb.screencap()):
                 return True
@@ -241,25 +249,29 @@ def _save_pattern(name, t0, events, quiet: bool = False) -> dict:
     return data
 
 
-def record_pattern(adb, name: str, wait_anchor: bool = True) -> dict:
+def record_pattern(adb, name: str, wait_anchor: bool = True,
+                   stop_event: threading.Event | None = None) -> dict:
     print(f"[record] เตรียมอัด pattern '{name}'")
     if wait_anchor:
         print("[record] รอเข้าด่าน... (กด Play ในเกมได้เลย)")
-        if not _wait_in_game(adb):
-            print("[record] ไม่พบว่าเข้าด่านภายในเวลาที่กำหนด ยกเลิก")
+        if not _wait_in_game(adb, stop_event=stop_event):
+            if _stopped(stop_event):
+                print("[record] ยกเลิกจากแอป")
+            else:
+                print("[record] ไม่พบว่าเข้าด่านภายในเวลาที่กำหนด ยกเลิก")
             return {}
 
     # พยายามใช้ global keyboard hook ก่อน (จับปุ่มได้แม้โฟกัสอยู่หน้าต่างเกม)
     try:
         import keyboard  # noqa: F401
-        return _record_global(adb, name)
+        return _record_global(adb, name, stop_event=stop_event)
     except ImportError:
         print("[record] ไม่พบไลบรารี 'keyboard' -> ใช้โหมดสำรอง (ต้องโฟกัสที่หน้าต่าง Terminal นี้)")
         print("          ติดตั้งเพื่อกดในเกมได้เลย:  pip install keyboard")
         return _record_console(adb, name)
 
 
-def _record_global(adb, name: str) -> dict:
+def _record_global(adb, name: str, stop_event: threading.Event | None = None) -> dict:
     """อัดด้วย global hook: กดปุ่มที่ไหนก็ได้ (รวมถึงตอนโฟกัสหน้าต่างเกม)
 
     - อ่านจาก scan code -> ไม่สนภาษาคีย์บอร์ด (ไทย/อังกฤษ ก็กดได้)
@@ -328,6 +340,10 @@ def _record_global(adb, name: str) -> dict:
     relay_at = 0.0
     try:
         while not stop["v"]:
+            if _stopped(stop_event):
+                stop["v"] = True
+                stop["reason"] = "หยุดจากแอป"
+                break
             time.sleep(0.05)
             now = time.time()
             if now - last_save >= 5.0 and events:

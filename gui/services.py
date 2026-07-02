@@ -1,19 +1,40 @@
 """ชั้น business logic — แยกจาก UI"""
 from __future__ import annotations
 
-import subprocess
 import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from paths import app_dir, is_frozen
 from settings import load, save
 
 
 LogFn = Callable[[str], None]
 StatusFn = Callable[[str], None]
+
+
+class _LogStream:
+    """ดัก stdout/stderr จากบอทส่งเข้า log panel"""
+
+    def __init__(self, log: LogFn):
+        self._log = log
+        self._buf = ""
+
+    def write(self, s: str) -> int:
+        if not s:
+            return 0
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line:
+                self._log(line)
+        return len(s)
+
+    def flush(self) -> None:
+        if self._buf.strip():
+            self._log(self._buf.rstrip())
+            self._buf = ""
 
 
 @dataclass
@@ -83,46 +104,57 @@ class AdbService:
 
 
 class BotService:
+    """รันบอทใน background thread — ไม่ spawn .exe ซ้ำ (กันเปิดหน้าต่างรัวๆ)"""
+
     def __init__(self):
-        self._proc: subprocess.Popen | None = None
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
         self._on_done: Callable[[], None] | None = None
 
     @property
     def running(self) -> bool:
-        return self._proc is not None and self._proc.poll() is None
-
-    def _cmd(self, *args: str) -> list[str]:
-        if is_frozen():
-            return [sys.executable, "--bot", *args]
-        return [sys.executable, str(app_dir() / "bot.py"), *args]
+        return self._thread is not None and self._thread.is_alive()
 
     def start(self, args: list[str], log: LogFn, on_done: Callable[[], None] | None = None):
         if self.running:
             raise RuntimeError("บอทกำลังทำงานอยู่")
+        self._stop_event.clear()
         self._on_done = on_done
-        cmd = self._cmd(*args)
-        log(f">>> {' '.join(cmd)}")
-        self._proc = subprocess.Popen(
-            cmd, cwd=app_dir(),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        log(f">>> bot {' '.join(args)}")
+        self._thread = threading.Thread(
+            target=self._run_thread, args=(args, log), daemon=True,
         )
-        threading.Thread(target=self._read, args=(log,), daemon=True).start()
+        self._thread.start()
 
-    def _read(self, log: LogFn):
-        assert self._proc and self._proc.stdout
-        for line in self._proc.stdout:
-            log(line.rstrip())
-        log("[bot] จบการทำงาน")
-        self._proc = None
-        if self._on_done:
-            self._on_done()
+    def _run_thread(self, args: list[str], log: LogFn):
+        from bot import run_bot_from_argv
+
+        stream = _LogStream(log)
+        old_out, old_err = sys.stdout, sys.stderr
+        sys.stdout = stream  # type: ignore[assignment]
+        sys.stderr = stream  # type: ignore[assignment]
+        try:
+            run_bot_from_argv(args, stop_event=self._stop_event)
+        except Exception as e:
+            log(f"[bot] error: {e}")
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+            stream.flush()
+            log("[bot] จบการทำงาน")
+            self._thread = None
+            if self._on_done:
+                self._on_done()
 
     def stop(self, log: LogFn):
-        if self.running:
-            self._proc.terminate()  # type: ignore[union-attr]
-            log("[app] ส่งคำสั่งหยุดบอท")
+        if not self.running:
+            return
+        self._stop_event.set()
+        try:
+            import keyboard
+            keyboard.unhook_all()
+        except Exception:
+            pass
+        log("[app] ส่งคำสั่งหยุดบอท")
 
 
 def persist_settings(data: dict) -> None:

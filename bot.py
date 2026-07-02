@@ -24,6 +24,8 @@
 from __future__ import annotations
 
 import argparse
+import sys
+import threading
 import time
 
 import cv2
@@ -64,8 +66,7 @@ def draw_debug(img, result):
     return overlay
 
 
-def main():
-    apply_user_settings()
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Cookie Run Classic auto-play bot (LDPlayer/ADB)")
     parser.add_argument("--debug", action="store_true", help="แสดงหน้าต่าง debug")
     parser.add_argument("--prefer", choices=["jump", "slide"], default="jump",
@@ -84,7 +85,12 @@ def main():
                         help="ยิง action ของ pattern เร็วขึ้นกี่ ms (ชดเชย lag)")
     parser.add_argument("--jump-gap", type=int, default=None,
                         help="ระยะห่างขั้นต่ำระหว่างกระโดด (ms) กัน double jump (ค่าเริ่มต้นจาก settings)")
-    args = parser.parse_args()
+    return parser
+
+
+def run_bot_from_argv(argv: list[str], stop_event: threading.Event | None = None) -> None:
+    apply_user_settings()
+    args = _build_parser().parse_args(argv)
 
     jump_gap = args.jump_gap
     if jump_gap is None:
@@ -96,7 +102,7 @@ def main():
 
     # --- โหมดจัดการ pattern แบบครั้งเดียวจบ ---
     if args.record:
-        record_pattern(adb, args.record)
+        record_pattern(adb, args.record, stop_event=stop_event)
         return
     if args.play_pattern and args.loop:
         # --play-pattern + --loop = เล่นวนครบวงจร (รวมจบเกมกลับ lobby)
@@ -138,6 +144,9 @@ def main():
 
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                print("[bot] หยุดจากแอป")
+                break
             t0 = time.time()
             try:
                 img = adb.screencap()
@@ -253,6 +262,10 @@ def main():
     finally:
         if args.debug:
             cv2.destroyAllWindows()
+
+
+def main():
+    run_bot_from_argv(sys.argv[1:])
 
 
 if __name__ == "__main__":
