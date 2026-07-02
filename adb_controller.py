@@ -4,12 +4,23 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 
 import cv2
 import numpy as np
 
 import config
+
+
+def _subprocess_kwargs() -> dict:
+    """ซ่อนหน้าต่าง console ของ adb.exe บน Windows (กันกระพริบตอน screencap รัวๆ)"""
+    if sys.platform != "win32":
+        return {}
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = 0  # SW_HIDE
+    return {"creationflags": subprocess.CREATE_NO_WINDOW, "startupinfo": si}
 
 
 class ADBController:
@@ -24,17 +35,21 @@ class ADBController:
             cmd,
             capture_output=capture,
             check=False,
+            **_subprocess_kwargs(),
         )
 
     def connect(self) -> bool:
         """เชื่อมต่อกับ emulator. คืน True ถ้าต่อสำเร็จ"""
         # start adb server + connect
-        subprocess.run([self.adb_path, "connect", self.serial], capture_output=True, check=False)
+        kw = _subprocess_kwargs()
+        subprocess.run([self.adb_path, "connect", self.serial],
+                       capture_output=True, check=False, **kw)
         result = subprocess.run(
             [self.adb_path, "-s", self.serial, "get-state"],
             capture_output=True,
             text=True,
             check=False,
+            **kw,
         )
         state = (result.stdout or "").strip()
         ok = state == "device"
