@@ -1,4 +1,4 @@
 """เวอร์ชันของแอป — อัปเดตทุกครั้งที่ release"""
-VERSION = "2.0.1"
+VERSION = "2.0.2"
 GITHUB_REPO = "Chinaapanda/Bot-cookie"
 GITHUB_URL = f"https://github.com/{GITHUB_REPO}"
