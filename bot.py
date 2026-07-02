@@ -82,7 +82,13 @@ def main():
                         help="ใช้ pattern นี้เล่นช่วงอยู่ในด่าน (แทนการ react สด) -- ใช้คู่กับ --loop ได้")
     parser.add_argument("--lead", type=int, default=0,
                         help="ยิง action ของ pattern เร็วขึ้นกี่ ms (ชดเชย lag)")
+    parser.add_argument("--jump-gap", type=int, default=None,
+                        help="ระยะห่างขั้นต่ำระหว่างกระโดด (ms) กัน double jump (ค่าเริ่มต้นจาก settings)")
     args = parser.parse_args()
+
+    jump_gap = args.jump_gap
+    if jump_gap is None:
+        jump_gap = getattr(config, "JUMP_MIN_GAP_MS", 0)
 
     adb = ADBController()
     if not adb.connect():
@@ -104,7 +110,8 @@ def main():
                     time.sleep(2.5)
             except Exception as e:  # noqa: BLE001
                 print(f"[bot] เตรียม lobby ล้มเหลว: {e}")
-        status = play_pattern(adb, args.play_pattern, lead_ms=args.lead, watch_relay=True)
+        status = play_pattern(adb, args.play_pattern, lead_ms=args.lead,
+                              jump_gap_ms=jump_gap, watch_relay=True)
         if status == "game_over":
             try:
                 time.sleep(0.8)
@@ -183,6 +190,7 @@ def main():
                 if args.pattern:
                     print(f"[bot] เข้าด่าน -> เล่นตาม pattern '{args.pattern}' (lead={args.lead}ms)")
                     status = play_pattern(adb, args.pattern, lead_ms=args.lead,
+                                          jump_gap_ms=jump_gap,
                                           wait_anchor=False, verbose=True)
                     prev_jump = prev_slide = False
                     if status == "game_over":

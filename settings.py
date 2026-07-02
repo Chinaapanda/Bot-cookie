@@ -13,7 +13,7 @@ USER_KEYS = (
     "ADB_PATH", "ADB_SERIAL", "TAP_X", "TAP_Y", "SLIDE_X", "SLIDE_Y",
     "ROI_JUMP", "ROI_SLIDE", "ROI_PLAYER",
     "TARGET_FPS", "CAPTURE_RAW", "DETECT_METHOD", "MOTION_THRESHOLD",
-    "default_pattern", "default_lead", "auto_check_update",
+    "default_pattern", "default_lead", "jump_min_gap_ms", "timing_preset", "auto_check_update",
 )
 
 
@@ -43,6 +43,8 @@ def apply_user_settings() -> None:
             if key.startswith("ROI_") and isinstance(val, list):
                 val = tuple(val)
             setattr(config, key, val)
+    if "jump_min_gap_ms" in data:
+        config.JUMP_MIN_GAP_MS = int(data["jump_min_gap_ms"])
 
 
 def get(key: str, default=None):
@@ -75,6 +77,8 @@ def to_dict() -> dict:
         "MOTION_THRESHOLD": config.MOTION_THRESHOLD,
         "default_pattern": "EP1",
         "default_lead": 0,
+        "jump_min_gap_ms": 0,
+        "timing_preset": "faithful",
         "auto_check_update": True,
     }
     defaults.update(data)

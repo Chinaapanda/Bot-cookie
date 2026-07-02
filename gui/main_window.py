@@ -35,6 +35,7 @@ class CookieRunApp(ctk.CTk):
         self._page = "dashboard"
         self._nav_btns: dict[str, NavButton] = {}
         self._selected_pattern = ""
+        self._timing_preset = "faithful"
 
         self._build_shell()
         self._show_page("dashboard")
@@ -165,10 +166,17 @@ class CookieRunApp(ctk.CTk):
         return p
 
     def _build_control(self) -> ctk.CTkFrame:
-        p = self._page_frame()
-        SectionTitle(p, "ควบคุมการเล่น").grid(row=0, column=0, sticky="w", pady=(0, PAD))
+        p = ctk.CTkFrame(self.content, fg_color="transparent")
+        p.grid_columnconfigure(0, weight=1)
+        p.grid_rowconfigure(1, weight=1)
 
-        box = ctk.CTkFrame(p, fg_color=COLORS["card"], corner_radius=12,
+        top = ctk.CTkFrame(p, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew")
+        top.grid_columnconfigure(0, weight=1)
+
+        SectionTitle(top, "ควบคุมการเล่น").grid(row=0, column=0, sticky="w", pady=(0, PAD))
+
+        box = ctk.CTkFrame(top, fg_color=COLORS["card"], corner_radius=12,
                            border_width=1, border_color=COLORS["border"])
         box.grid(row=1, column=0, sticky="ew", pady=(0, PAD))
         box.grid_columnconfigure(1, weight=1)
@@ -185,8 +193,26 @@ class CookieRunApp(ctk.CTk):
         ctk.CTkLabel(lead_row, text="  ลบ=ช้าลง  บวก=เร็วขึ้น",
                      font=FONT_SMALL, text_color=COLORS["muted"]).pack(side="left", padx=8)
 
+        ctk.CTkLabel(box, text="Jump gap (ms)", font=FONT_BODY).grid(row=2, column=0, padx=PAD, pady=8, sticky="w")
+        gap_row = ctk.CTkFrame(box, fg_color="transparent")
+        gap_row.grid(row=2, column=1, sticky="w", padx=PAD, pady=8)
+        self._ctl_jump_gap = ctk.CTkEntry(gap_row, width=80, font=FONT_BODY)
+        self._ctl_jump_gap.pack(side="left")
+        ctk.CTkLabel(gap_row, text="  0=เล่นเป๊ะ  เพิ่มถ้า double jump",
+                     font=FONT_SMALL, text_color=COLORS["muted"]).pack(side="left", padx=8)
+
+        preset_row = ctk.CTkFrame(box, fg_color="transparent")
+        preset_row.grid(row=3, column=0, columnspan=2, sticky="w", padx=PAD, pady=(0, 8))
+        ctk.CTkLabel(preset_row, text="โหมดจังหวะ", font=FONT_BODY).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(preset_row, text="เป๊ะ", width=90,
+                      command=lambda: self._apply_timing_preset("faithful"),
+                      fg_color=COLORS["accent"], text_color=COLORS["bg_dark"]).pack(side="left", padx=4)
+        ctk.CTkButton(preset_row, text="กัน double jump", width=140,
+                      command=lambda: self._apply_timing_preset("safe"),
+                      fg_color=COLORS["card_hover"]).pack(side="left", padx=4)
+
         btns = ctk.CTkFrame(box, fg_color="transparent")
-        btns.grid(row=2, column=0, columnspan=2, padx=PAD, pady=PAD, sticky="ew")
+        btns.grid(row=4, column=0, columnspan=2, padx=PAD, pady=PAD, sticky="ew")
         for text, cmd, color in (
             ("▶  เล่นวน (Loop)", self._start_loop, COLORS["accent"]),
             ("▶  เล่น 1 รอบ", self._start_once, COLORS["card_hover"]),
@@ -198,10 +224,24 @@ class CookieRunApp(ctk.CTk):
                           text_color=COLORS["bg_dark"] if color == COLORS["accent"] else COLORS["text"]
                           ).pack(side="left", padx=4)
 
-        hint = ctk.CTkFrame(p, fg_color=COLORS["card"], corner_radius=10)
+        hint = ctk.CTkFrame(top, fg_color=COLORS["card"], corner_radius=10)
         hint.grid(row=2, column=0, sticky="ew")
         ctk.CTkLabel(hint, text="คีย์ตอนอัด:  W=กระโดด  |  S/K=สไลด์  |  Q=จบและบันทึก",
-                     font=FONT_SMALL, text_color=COLORS["text_dim"]).pack(padx=PAD, pady=10)
+                     font=FONT_SMALL, text_color=COLORS["text_dim"]).pack(padx=PAD, pady=8)
+
+        log_area = ctk.CTkFrame(p, fg_color="transparent")
+        log_area.grid(row=1, column=0, sticky="nsew", pady=(PAD, 0))
+        log_area.grid_columnconfigure(0, weight=1)
+        log_area.grid_rowconfigure(1, weight=1)
+
+        log_top = ctk.CTkFrame(log_area, fg_color="transparent")
+        log_top.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ctk.CTkLabel(log_top, text="Log", font=FONT_SMALL,
+                     text_color=COLORS["text_dim"]).pack(side="left")
+        ctk.CTkButton(log_top, text="ล้าง", width=70, command=self._clear_logs,
+                      fg_color=COLORS["card_hover"], height=28).pack(side="right")
+        self._ctl_log = LogPanel(log_area, height=280)
+        self._ctl_log.grid(row=1, column=0, sticky="nsew")
         return p
 
     def _build_patterns(self) -> ctk.CTkFrame:
@@ -318,6 +358,9 @@ class CookieRunApp(ctk.CTk):
         self._ctl_pattern.set(pat)
         self._ctl_lead.delete(0, "end")
         self._ctl_lead.insert(0, str(self._cfg.get("default_lead", 0)))
+        self._ctl_jump_gap.delete(0, "end")
+        self._ctl_jump_gap.insert(0, str(self._cfg.get("jump_min_gap_ms", 0)))
+        self._timing_preset = self._cfg.get("timing_preset", "faithful")
 
         tap = f"{self._cfg.get('TAP_X', 244)},{self._cfg.get('TAP_Y', 937)}"
         slide = f"{self._cfg.get('SLIDE_X', 1700)},{self._cfg.get('SLIDE_Y', 937)}"
@@ -353,6 +396,11 @@ class CookieRunApp(ctk.CTk):
             data["default_lead"] = int(self._ctl_lead.get().strip())
         except ValueError:
             data["default_lead"] = 0
+        try:
+            data["jump_min_gap_ms"] = int(self._ctl_jump_gap.get().strip())
+        except ValueError:
+            data["jump_min_gap_ms"] = 0
+        data["timing_preset"] = getattr(self, "_timing_preset", "faithful")
         data["auto_check_update"] = self._var_auto_up.get()
         return data
 
@@ -515,6 +563,7 @@ class CookieRunApp(ctk.CTk):
     def _start_bot(self, args: list[str]):
         try:
             self._save_quiet()
+            self._show_page("control")
             self._bot.start(args, log=self._log, on_done=self._on_bot_done)
             self._set_bot_status(True)
         except RuntimeError as e:
@@ -531,13 +580,32 @@ class CookieRunApp(ctk.CTk):
             self._card_bot.set("หยุด", "พร้อมเริ่มใหม่", COLORS["text_dim"])
             self._st_bot.configure(text="บอท: หยุด", text_color=COLORS["muted"])
 
+    def _apply_timing_preset(self, preset: str, save: bool = True):
+        presets = {
+            "faithful": ("0", "0"),
+            "safe": ("0", "280"),
+        }
+        lead, gap = presets.get(preset, presets["faithful"])
+        self._timing_preset = preset
+        self._ctl_lead.delete(0, "end")
+        self._ctl_lead.insert(0, lead)
+        self._ctl_jump_gap.delete(0, "end")
+        self._ctl_jump_gap.insert(0, gap)
+        if save:
+            self._save_quiet()
+            self._log(f"[timing] โหมด: {'เป๊ะ' if preset == 'faithful' else 'กัน double jump'}")
+
     def _start_loop(self):
-        p, lead = self._ctl_pattern.get().strip(), self._ctl_lead.get().strip() or "0"
-        self._start_bot(["--loop", "--pattern", p, "--lead", lead])
+        p = self._ctl_pattern.get().strip()
+        lead = self._ctl_lead.get().strip() or "0"
+        gap = self._ctl_jump_gap.get().strip() or "0"
+        self._start_bot(["--loop", "--pattern", p, "--lead", lead, "--jump-gap", gap])
 
     def _start_once(self):
-        p, lead = self._ctl_pattern.get().strip(), self._ctl_lead.get().strip() or "0"
-        self._start_bot(["--play-pattern", p, "--lead", lead])
+        p = self._ctl_pattern.get().strip()
+        lead = self._ctl_lead.get().strip() or "0"
+        gap = self._ctl_jump_gap.get().strip() or "0"
+        self._start_bot(["--play-pattern", p, "--lead", lead, "--jump-gap", gap])
 
     def _start_record(self):
         self._start_bot(["--record", self._ctl_pattern.get().strip()])
@@ -574,11 +642,13 @@ class CookieRunApp(ctk.CTk):
                 break
             self._main_log.append(line)
             self._dash_log.append(line)
+            self._ctl_log.append(line)
         self.after(150, self._drain_log)
 
     def _clear_logs(self):
         self._main_log.clear()
         self._dash_log.clear()
+        self._ctl_log.clear()
 
     # ------------------------------------------------------------------ update
     def _check_update_silent(self):

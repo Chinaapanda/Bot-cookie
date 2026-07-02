@@ -168,8 +168,53 @@ _SCAN_ACTION = {
 
 # ระยะกดค้างเริ่มต้น (ms) เผื่อ pattern เก่าที่ไม่มีข้อมูล dur
 _DEFAULT_TAP_MS = 60
-# กันบันทึกกระโดดซ้ำจากคีย์บอร์ดเด้ง / ส่งซ้ำเร็วเกินไป
-_JUMP_DEBOUNCE_S = 0.12
+
+
+def _record_debounce_s() -> float:
+    return max(0, getattr(config, "JUMP_RECORD_DEBOUNCE_MS", 250)) / 1000.0
+
+
+def _jump_min_gap_s(gap_ms: int | None = None) -> float:
+    if gap_ms is not None:
+        return max(0, gap_ms) / 1000.0
+    return max(0, getattr(config, "JUMP_MIN_GAP_MS", 0)) / 1000.0
+
+
+def _first_event_t(events: list[dict]) -> float:
+    """เวลาจังหวะแรก (ไม่รวม relay) — ใช้เป็น anchor"""
+    action = [e["t"] for e in events if e.get("a") != "relay"]
+    return round(min(action), 3) if action else 0.0
+
+
+def _space_jump_gaps(events: list[dict], min_gap_s: float) -> tuple[list[dict], int]:
+    """ขยายช่วงห่างระหว่างกระโดดที่ติดกันเกินไป (กันเกมนับเป็น double jump)"""
+    if min_gap_s <= 0:
+        return events, 0
+    out: list[dict] = []
+    last_jump_t = -1e9
+    adjusted = 0
+    for ev in sorted(events, key=lambda e: e["t"]):
+        ev = dict(ev)
+        a = ev.get("a")
+        if a == "jump":
+            if last_jump_t > -1e8 and ev["t"] - last_jump_t < min_gap_s:
+                ev["t"] = round(last_jump_t + min_gap_s, 3)
+                adjusted += 1
+            last_jump_t = ev["t"]
+            out.append(ev)
+        elif a == "double":
+            t0 = ev["t"]
+            if last_jump_t > -1e8 and t0 - last_jump_t < min_gap_s:
+                t0 = round(last_jump_t + min_gap_s, 3)
+                adjusted += 1
+            out.append({"t": t0, "a": "jump"})
+            t1 = round(t0 + min_gap_s, 3)
+            out.append({"t": t1, "a": "jump"})
+            last_jump_t = t1
+            adjusted += 1
+        else:
+            out.append(ev)
+    return out, adjusted
 
 
 def _point(action: str):
@@ -180,10 +225,12 @@ def _point(action: str):
 
 
 def _save_pattern(name, t0, events, quiet: bool = False) -> dict:
+    first_t = _first_event_t(events)
     data = {
         "name": name,
         "duration": round(time.time() - t0, 3),
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "anchor": {"first_event_t": first_t},
         "events": events,
     }
     pattern_path(name).write_text(
@@ -255,7 +302,7 @@ def _record_global(adb, name: str) -> dict:
                 held[e.scan_code] = (t, action, pt)
                 adb.touch_down(*pt)  # มุด = กดค้างจริง (ปล่อยตอน key up)
             else:  # jump = แตะครั้งเดียว (อยากดับเบิลก็กดอีกที)
-                if t - last_jump_t < _JUMP_DEBOUNCE_S:
+                if t - last_jump_t < _record_debounce_s():
                     return
                 last_jump_t = t
                 held[e.scan_code] = (t, action, pt)
@@ -407,24 +454,32 @@ def _split_segments(events: list[dict]) -> list[tuple]:
     return segments
 
 
-def _sleep_until(adb, target_t, t0, lead, watch_relay: bool, verbose: bool) -> None:
-    """รอจนถึงเวลา target แต่เช็ค Relay Boost / หน้า Result ระหว่างทาง"""
+_SCREEN_CHECK_INTERVAL = 1.5
+
+
+def _sleep_delta(adb, duration: float, watch_relay: bool, verbose: bool) -> None:
+    """รอตามช่วงเวลา (delta) — เช็คจอ Result/Relay ไม่บ่อยเกินไป"""
+    if duration <= 0:
+        return
     from auto_lobby import is_relay_boost, is_result, RELAY_TAP
 
+    end = time.time() + duration
+    last_check = 0.0
     relay_at = 0.0
     while True:
         now = time.time()
-        delay = (t0 + target_t - lead) - now
-        if delay <= 0:
+        remaining = end - now
+        if remaining <= 0:
             break
-        if now - relay_at > 0.8:
+        if now - last_check >= _SCREEN_CHECK_INTERVAL:
+            last_check = now
             try:
                 img = adb.screencap()
                 if is_result(img):
                     if verbose:
                         print("  -> หน้า Result (จบเกม) -> หยุด pattern")
                     raise GameOver()
-                if watch_relay and is_relay_boost(img):
+                if watch_relay and is_relay_boost(img) and now - relay_at > 0.8:
                     adb.tap(*RELAY_TAP)
                     relay_at = now
                     if verbose:
@@ -435,37 +490,42 @@ def _sleep_until(adb, target_t, t0, lead, watch_relay: bool, verbose: bool) -> N
                 raise
             except Exception:
                 pass
-        time.sleep(min(delay, 0.12))
+        time.sleep(min(remaining, 0.05))
 
 
-def _play_timeline(adb, timeline, t0, lead, verbose, watch_relay: bool = True) -> None:
+def _exec_timeline_action(adb, typ: str, pt: tuple, dur: int) -> float:
+    """ยิง action แล้วคืนเวลาที่ใช้จริง (วินาที)"""
+    t0 = time.perf_counter()
+    if typ == "jump":
+        adb.single_tap(*pt)
+    elif typ == "down":
+        adb.touch_down(*pt)
+    else:
+        adb.touch_up(*pt)
+    return time.perf_counter() - t0
+
+
+def _play_timeline_delta(adb, timeline, lead: float, verbose: bool,
+                         watch_relay: bool = True) -> None:
+    """เล่น timeline แบบ delta — ไม่สะสม drift จาก screencap/ADB latency"""
+    prev_t = 0.0
+    exec_debt = 0.0
     for tt, typ, pt, a, dur in timeline:
-        _sleep_until(adb, tt, t0, lead, watch_relay, verbose)
-        if typ == "jump":
-            adb.single_tap(*pt)
-            if verbose:
+        delta = tt - prev_t
+        wait = max(0.0, delta - lead - exec_debt)
+        _sleep_delta(adb, wait, watch_relay, verbose)
+        exec_debt = _exec_timeline_action(adb, typ, pt, dur)
+        if verbose:
+            if typ == "jump":
                 print(f"  {tt:6.2f}s -> {a}")
-        elif typ == "down":
-            adb.touch_down(*pt)
-            if verbose:
+            elif typ == "down":
                 print(f"  {tt:6.2f}s -> {a} (ค้าง {dur}ms)")
-        else:  # up
-            adb.touch_up(*pt)
-        # เช็คจบเกมหลัง action ด้วย (ตอบสนองเร็วขึ้น)
-        try:
-            from auto_lobby import is_result
-            if is_result(adb.screencap()):
-                if verbose:
-                    print("  -> หน้า Result (จบเกม) -> หยุด pattern")
-                raise GameOver()
-        except GameOver:
-            raise
-        except Exception:
-            pass
+        prev_t = tt
 
 
-def play_pattern(adb, name, lead_ms: int = 0, wait_anchor: bool = True,
-                 verbose: bool = True, watch_relay: bool = True) -> str | bool:
+def play_pattern(adb, name, lead_ms: int = 0, jump_gap_ms: int | None = None,
+                 wait_anchor: bool = True, verbose: bool = True,
+                 watch_relay: bool = True) -> str | bool:
     """เล่น pattern คืน 'done' | 'game_over' | False (ล้มเหลว)"""
     from auto_lobby import is_relay_boost, RELAY_TAP
 
@@ -474,6 +534,12 @@ def play_pattern(adb, name, lead_ms: int = 0, wait_anchor: bool = True,
     if not events:
         print(f"[play] pattern '{data.get('name', name)}' ว่างเปล่า")
         return False
+
+    gap_ms = jump_gap_ms if jump_gap_ms is not None else int(_jump_min_gap_s() * 1000)
+    events, n_spaced = _space_jump_gaps(events, _jump_min_gap_s(gap_ms))
+
+    anchor = data.get("anchor") or {}
+    first_event_t = float(anchor.get("first_event_t", _first_event_t(events)))
 
     if wait_anchor:
         if verbose:
@@ -486,16 +552,28 @@ def play_pattern(adb, name, lead_ms: int = 0, wait_anchor: bool = True,
     lead = lead_ms / 1000.0
     if verbose:
         n_relay = sum(1 for e in events if e["a"] == "relay")
+        extra = f", ขยายช่วงกระโดด {n_spaced} จุด" if n_spaced else ""
         print(f"[play] เล่นตาม pattern '{data.get('name', name)}' "
-              f"({len(events) - n_relay} จังหวะ, {n_relay} จุด sync, lead={lead_ms}ms)")
+              f"({len(events) - n_relay} จังหวะ, {n_relay} จุด sync, "
+              f"lead={lead_ms}ms, jump_gap={gap_ms}ms, anchor={first_event_t:.2f}s{extra})")
 
     status = "done"
     try:
+        first_segment = True
         for base, evs, ends_with_relay in segments:
             timeline = _build_timeline(evs, base=base)
-            t0 = time.time()
+            if not timeline:
+                continue
+            if first_segment and first_event_t > 0:
+                # รอให้ตรงจังหวะก่อนกดครั้งแรก (เท่ากับตอนอัด)
+                anchor_wait = max(0.0, first_event_t - timeline[0][0] - lead)
+                if anchor_wait > 0:
+                    if verbose:
+                        print(f"  ...รอ anchor {anchor_wait:.2f}s ก่อนจังหวะแรก")
+                    _sleep_delta(adb, anchor_wait, watch_relay, verbose)
+                first_segment = False
             try:
-                _play_timeline(adb, timeline, t0, lead, verbose, watch_relay)
+                _play_timeline_delta(adb, timeline, lead, verbose, watch_relay)
             except GameOver:
                 status = "game_over"
                 break
@@ -545,6 +623,8 @@ def main():
     p_play = sub.add_parser("play", help="เล่นซ้ำ pattern")
     p_play.add_argument("name", help="ชื่อ pattern")
     p_play.add_argument("--lead", type=int, default=0, help="ยิง action เร็วขึ้นกี่ ms (ชดเชย lag)")
+    p_play.add_argument("--jump-gap", type=int, default=None,
+                        help="ระยะห่างขั้นต่ำระหว่างกระโดด (ms) กัน double jump")
     p_play.add_argument("--no-wait", action="store_true", help="ไม่ต้องรอ anchor เริ่มเล่นทันที")
     p_play.add_argument("--no-prep", action="store_true", help="ไม่เตรียม lobby/Play ก่อนเล่น")
 
@@ -579,7 +659,9 @@ def main():
                     time.sleep(2.5)
             except Exception as e:
                 print(f"[play] เตรียม lobby ล้มเหลว: {e}")
-        play_pattern(adb, args.name, lead_ms=args.lead, wait_anchor=not args.no_wait)
+        play_pattern(adb, args.name, lead_ms=args.lead,
+                     jump_gap_ms=getattr(args, "jump_gap", None),
+                     wait_anchor=not args.no_wait)
 
 
 if __name__ == "__main__":
