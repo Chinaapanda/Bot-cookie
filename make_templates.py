@@ -20,6 +20,7 @@ JOBS = [
     ("loop_check.png", "in_game", (150, 905, 365, 970)),     # ปุ่ม "Jump" (มีเฉพาะตอนอยู่ในด่าน)
     ("rec/002.png", "mystery_box", (694, 71, 1219, 178)),    # หัวข้อ "Mystery Box" (หน้า Open all/Confirm)
     ("rec/004.png", "confirm_btn", (770, 910, 1150, 1025)),  # ปุ่ม "Confirm" (รางวัล/เลเวลอัพ)
+    ("after_jump.png", "ok_btn", (600, 895, 785, 965)),     # ปุ่ม "OK" (Result / popup)
 ]
 
 for src, name, (x1, y1, x2, y2) in JOBS:

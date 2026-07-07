@@ -19,6 +19,7 @@ Macro อัตโนมัติก่อนเริ่มเล่น Cookie 
 from __future__ import annotations
 
 import argparse
+import threading
 import time
 
 import cv2
@@ -65,7 +66,7 @@ def _templates():
     if not _T:
         for n in ("lobby_marker", "buy_title", "modal_multibuy", "double_coins",
                   "relay_boost", "result_title", "multi_btn", "in_game",
-                  "mystery_box", "confirm_btn"):
+                  "mystery_box", "confirm_btn", "ok_btn"):
             _T[n] = _load(n)
     return _T
 
@@ -75,6 +76,18 @@ def _score(img, tpl) -> float:
         return 0.0
     res = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED)
     return float(cv2.minMaxLoc(res)[1])
+
+
+def _locate(img, tpl, thr: float) -> tuple[int, int] | None:
+    """คืนจุดกึ่งกลางของ template ที่ match ได้ หรือ None"""
+    if tpl.shape[0] > img.shape[0] or tpl.shape[1] > img.shape[1]:
+        return None
+    res = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(res)
+    if max_val < thr:
+        return None
+    h, w = tpl.shape[:2]
+    return max_loc[0] + w // 2, max_loc[1] + h // 2
 
 
 def _scores(img) -> dict:
@@ -126,10 +139,31 @@ def is_confirm(img):
     return _score(img, _templates()["confirm_btn"]) >= THR
 
 
-def wait_for(adb, pred, timeout=30.0, interval=0.6):
-    """รอจนกว่า pred(img) เป็นจริง หรือหมดเวลา คืน img ที่ผ่านเงื่อนไข หรือ None"""
+def is_ok_btn(img):
+    """มีปุ่ม OK (Result / popup ทั่วไป)"""
+    return _score(img, _templates()["ok_btn"]) >= THR
+
+
+def ok_btn_tap(img) -> tuple[int, int]:
+    """พิกัดแตะปุ่ม OK — ใช้จุด match จริง หรือ RESULT_OK ถ้าหาไม่เจอ"""
+    pt = _locate(img, _templates()["ok_btn"], THR)
+    return pt if pt is not None else RESULT_OK
+
+
+def _stopped(stop_event: threading.Event | None) -> bool:
+    return stop_event is not None and stop_event.is_set()
+
+
+def wait_for(adb, pred, timeout=30.0, interval=0.6,
+             stop_event: threading.Event | None = None):
+    """รอจนกว่า pred(img) เป็นจริง หรือหมดเวลา คืน img ที่ผ่านเงื่อนไข หรือ None
+
+    ถ้าผู้ใช้สั่งหยุด (stop_event) จะเลิกรอทันทีและคืน None
+    """
     t0 = time.time()
     while time.time() - t0 < timeout:
+        if _stopped(stop_event):
+            return None
         img = adb.screencap()
         if pred(img):
             return img
@@ -137,7 +171,10 @@ def wait_for(adb, pred, timeout=30.0, interval=0.6):
     return None
 
 
-def prepare_double_coins(adb, want_play=False, max_multibuy=5) -> bool:
+def prepare_double_coins(adb, want_play=False, max_multibuy=5,
+                         stop_event: threading.Event | None = None) -> bool:
+    if _stopped(stop_event):
+        return False
     img = adb.screencap()
     if DEBUG:
         print("  scores:", {k: round(v, 2) for k, v in _scores(img).items()})
@@ -146,7 +183,8 @@ def prepare_double_coins(adb, want_play=False, max_multibuy=5) -> bool:
     if is_lobby(img) and not is_buy(img):
         print("[lobby] กด Play! เข้าหน้าซื้อ")
         adb.tap(*LOBBY_PLAY)
-        wait_for(adb, lambda im: is_buy(im) or is_modal(im), timeout=8)
+        wait_for(adb, lambda im: is_buy(im) or is_modal(im), timeout=8,
+                 stop_event=stop_event)
 
     # 2) มี Double Coins อยู่แล้ว?
     if has_double_coins(adb.screencap()):
@@ -157,6 +195,9 @@ def prepare_double_coins(adb, want_play=False, max_multibuy=5) -> bool:
         buys = 0
         unknown = 0
         while time.time() < deadline and buys < max_multibuy:
+            if _stopped(stop_event):
+                print("[lobby] หยุดการเตรียม (สั่งหยุดจากแอป)")
+                return False
             cur = adb.screencap()
             if has_double_coins(cur):
                 break
@@ -164,22 +205,28 @@ def prepare_double_coins(adb, want_play=False, max_multibuy=5) -> bool:
                 buys += 1
                 print(f"[modal] กด Multi-Buy ครั้งที่ {buys} (รอเกมวนซื้อจนได้ Double Coins)")
                 adb.tap(*MODAL_MULTI_BUY)
-                if wait_for(adb, has_double_coins, timeout=35) is not None:
+                if wait_for(adb, has_double_coins, timeout=35,
+                            stop_event=stop_event) is not None:
                     break
                 unknown = 0
             elif is_buy(cur):
                 if not has_multi_btn(cur):
                     print("[buy] ยังไม่ได้เลือก Random Boost -> กดกล่อง ? ก่อน")
                     adb.tap(*BUY_RANDOM_ITEM)
-                    wait_for(adb, has_multi_btn, timeout=5)
+                    wait_for(adb, has_multi_btn, timeout=5, stop_event=stop_event)
                 print("[buy] กดปุ่ม Multi เปิด modal")
                 adb.tap(*BUY_MULTI)
-                wait_for(adb, is_modal, timeout=6)
+                wait_for(adb, is_modal, timeout=6, stop_event=stop_event)
                 unknown = 0
             elif is_lobby(cur):
                 print("[lobby] กด Play! เข้าหน้าซื้อ")
                 adb.tap(*LOBBY_PLAY)
-                wait_for(adb, is_buy, timeout=8)
+                wait_for(adb, is_buy, timeout=8, stop_event=stop_event)
+                unknown = 0
+            elif is_ok_btn(cur):
+                print("[popup] เจอปุ่ม OK -> กด")
+                adb.tap(*ok_btn_tap(cur))
+                time.sleep(0.8)
                 unknown = 0
             else:
                 # หน้าจอไม่รู้จัก (ป๊อปอัพ/เมนูอื่น) -> กด Back เพื่อกลับ
@@ -202,6 +249,36 @@ def prepare_double_coins(adb, want_play=False, max_multibuy=5) -> bool:
         print("[play] กด Play! เริ่มด่าน")
         adb.tap(*BUY_PLAY)
     return ok
+
+
+def prepare_play_only(adb, want_play: bool = False,
+                      stop_event: threading.Event | None = None) -> bool:
+    """เข้าหน้าซื้อแล้วกด Play — ไม่สุ่ม Double Coins"""
+    if _stopped(stop_event):
+        return False
+    img = adb.screencap()
+    if is_lobby(img) and not is_buy(img):
+        print("[lobby] กด Play! เข้าหน้าซื้อ (ข้าม Double Coins)")
+        adb.tap(*LOBBY_PLAY)
+        wait_for(adb, is_buy, timeout=8, stop_event=stop_event)
+    if want_play:
+        cur = adb.screencap()
+        if is_buy(cur):
+            print("[play] กด Play! เริ่มด่าน (ไม่สุ่มบูสต์)")
+            adb.tap(*BUY_PLAY)
+        elif is_lobby(cur):
+            adb.tap(*LOBBY_PLAY)
+            wait_for(adb, is_buy, timeout=8, stop_event=stop_event)
+            adb.tap(*BUY_PLAY)
+    return True
+
+
+def prepare_for_run(adb, want_play: bool = False, use_double_coins: bool = True,
+                    stop_event: threading.Event | None = None) -> bool:
+    """เตรียม lobby ก่อนเล่น — เลือกได้ว่าจะสุ่ม Double Coins หรือไม่"""
+    if use_double_coins:
+        return prepare_double_coins(adb, want_play=want_play, stop_event=stop_event)
+    return prepare_play_only(adb, want_play=want_play, stop_event=stop_event)
 
 
 def main():

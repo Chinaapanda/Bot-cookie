@@ -32,6 +32,7 @@ import time
 
 import config
 from adb_controller import ADBController
+from runtime import get_live_lead_ms
 
 try:
     import msvcrt  # คีย์บอร์ดแบบ non-blocking บน Windows
@@ -44,6 +45,10 @@ PATTERN_DIR.mkdir(exist_ok=True)
 
 class GameOver(Exception):
     """จบเกมก่อน pattern เล่นครบ (เจอหน้า Result)"""
+
+
+class Stopped(Exception):
+    """ผู้ใช้สั่งหยุดบอทระหว่างเล่น pattern (กดปุ่มหยุดในแอป)"""
 
 
 # ---------------------------------------------------------------------------
@@ -473,16 +478,29 @@ def _split_segments(events: list[dict]) -> list[tuple]:
 _SCREEN_CHECK_INTERVAL = 1.5
 
 
-def _sleep_delta(adb, duration: float, watch_relay: bool, verbose: bool) -> None:
-    """รอตามช่วงเวลา (delta) — เช็คจอ Result/Relay ไม่บ่อยเกินไป"""
+def _sleep_delta(adb, duration: float, watch_relay: bool, verbose: bool,
+                 stop_event: threading.Event | None = None,
+                 watch_surprise: bool = True) -> None:
+    """รอตามช่วงเวลา (delta) — เช็คจอ Result/Relay ไม่บ่อยเกินไป
+
+    ถ้าผู้ใช้สั่งหยุด (stop_event) จะหยุดรอทันทีและโยน Stopped ออกไป
+    เพื่อให้ pattern เลิกเล่นได้เร็ว ไม่ต้องรอจนครบ timeline
+    """
     if duration <= 0:
+        if _stopped(stop_event):
+            raise Stopped()
         return
-    from auto_lobby import is_relay_boost, is_result, RELAY_TAP
+    from auto_lobby import is_relay_boost, is_result, is_ok_btn, ok_btn_tap, RELAY_TAP
+    from surprise_card import is_surprise_card, handle_surprise_card
+    from runtime import feature_enabled
 
     end = time.time() + duration
     last_check = 0.0
     relay_at = 0.0
+    surprise_at = 0.0
     while True:
+        if _stopped(stop_event):
+            raise Stopped()
         now = time.time()
         remaining = end - now
         if remaining <= 0:
@@ -491,10 +509,23 @@ def _sleep_delta(adb, duration: float, watch_relay: bool, verbose: bool) -> None
             last_check = now
             try:
                 img = adb.screencap()
-                if is_result(img):
+                if feature_enabled("post_game") and is_result(img):
                     if verbose:
                         print("  -> หน้า Result (จบเกม) -> หยุด pattern")
                     raise GameOver()
+                if feature_enabled("post_game") and is_ok_btn(img):
+                    adb.tap(*ok_btn_tap(img))
+                    if verbose:
+                        print("  -> ปุ่ม OK -> กด")
+                    time.sleep(0.8)
+                    continue
+                if watch_surprise and is_surprise_card(img) and now - surprise_at > 2.0:
+                    if handle_surprise_card(adb, img, verbose=verbose):
+                        surprise_at = now
+                        if verbose:
+                            print("  -> Surprise Card (ระหว่างเล่น pattern)")
+                        time.sleep(0.5)
+                        continue
                 if watch_relay and is_relay_boost(img) and now - relay_at > 0.8:
                     adb.tap(*RELAY_TAP)
                     relay_at = now
@@ -521,15 +552,19 @@ def _exec_timeline_action(adb, typ: str, pt: tuple, dur: int) -> float:
     return time.perf_counter() - t0
 
 
-def _play_timeline_delta(adb, timeline, lead: float, verbose: bool,
-                         watch_relay: bool = True) -> None:
+def _play_timeline_delta(adb, timeline, lead_ms: int, verbose: bool,
+                         watch_relay: bool = True,
+                         stop_event: threading.Event | None = None,
+                         watch_surprise: bool = True) -> None:
     """เล่น timeline แบบ delta — ไม่สะสม drift จาก screencap/ADB latency"""
     prev_t = 0.0
     exec_debt = 0.0
     for tt, typ, pt, a, dur in timeline:
         delta = tt - prev_t
+        lead = get_live_lead_ms(lead_ms) / 1000.0
         wait = max(0.0, delta - lead - exec_debt)
-        _sleep_delta(adb, wait, watch_relay, verbose)
+        _sleep_delta(adb, wait, watch_relay, verbose, stop_event=stop_event,
+                     watch_surprise=watch_surprise)
         exec_debt = _exec_timeline_action(adb, typ, pt, dur)
         if verbose:
             if typ == "jump":
@@ -541,8 +576,10 @@ def _play_timeline_delta(adb, timeline, lead: float, verbose: bool,
 
 def play_pattern(adb, name, lead_ms: int = 0, jump_gap_ms: int | None = None,
                  wait_anchor: bool = True, verbose: bool = True,
-                 watch_relay: bool = True) -> str | bool:
-    """เล่น pattern คืน 'done' | 'game_over' | False (ล้มเหลว)"""
+                 watch_relay: bool = True,
+                 watch_surprise: bool = True,
+                 stop_event: threading.Event | None = None) -> str | bool:
+    """เล่น pattern คืน 'done' | 'game_over' | 'stopped' | False (ล้มเหลว)"""
     from auto_lobby import is_relay_boost, RELAY_TAP
 
     data = load_pattern(name)
@@ -560,12 +597,13 @@ def play_pattern(adb, name, lead_ms: int = 0, jump_gap_ms: int | None = None,
     if wait_anchor:
         if verbose:
             print("[play] รอเข้าด่าน...")
-        if not _wait_in_game(adb):
+        if not _wait_in_game(adb, stop_event=stop_event):
+            if _stopped(stop_event):
+                return "stopped"
             print("[play] ไม่พบว่าเข้าด่าน ยกเลิกการเล่น pattern")
             return False
 
     segments = _split_segments(events)
-    lead = lead_ms / 1000.0
     if verbose:
         n_relay = sum(1 for e in events if e["a"] == "relay")
         extra = f", ขยายช่วงกระโดด {n_spaced} จุด" if n_spaced else ""
@@ -577,45 +615,65 @@ def play_pattern(adb, name, lead_ms: int = 0, jump_gap_ms: int | None = None,
     try:
         first_segment = True
         for base, evs, ends_with_relay in segments:
+            if _stopped(stop_event):
+                status = "stopped"
+                break
             timeline = _build_timeline(evs, base=base)
             if not timeline:
                 continue
             if first_segment and first_event_t > 0:
                 # รอให้ตรงจังหวะก่อนกดครั้งแรก (เท่ากับตอนอัด)
-                anchor_wait = max(0.0, first_event_t - timeline[0][0] - lead)
+                lead_s = get_live_lead_ms(lead_ms) / 1000.0
+                anchor_wait = max(0.0, first_event_t - timeline[0][0] - lead_s)
                 if anchor_wait > 0:
                     if verbose:
                         print(f"  ...รอ anchor {anchor_wait:.2f}s ก่อนจังหวะแรก")
-                    _sleep_delta(adb, anchor_wait, watch_relay, verbose)
+                    _sleep_delta(adb, anchor_wait, watch_relay, verbose,
+                                 stop_event=stop_event, watch_surprise=watch_surprise)
                 first_segment = False
             try:
-                _play_timeline_delta(adb, timeline, lead, verbose, watch_relay)
+                _play_timeline_delta(adb, timeline, lead_ms, verbose, watch_relay,
+                                     stop_event=stop_event, watch_surprise=watch_surprise)
             except GameOver:
                 status = "game_over"
+                break
+            except Stopped:
+                status = "stopped"
                 break
             if ends_with_relay and status == "done":
                 if verbose:
                     print("  ...รอ Relay Boost เพื่อ re-sync")
-                got = _wait_for(adb, is_relay_boost, timeout=10.0)
+                got = _wait_for(adb, is_relay_boost, timeout=10.0,
+                                stop_event=stop_event)
+                if _stopped(stop_event):
+                    status = "stopped"
+                    break
                 adb.tap(*RELAY_TAP)
                 if verbose:
                     print(f"  -> แตะ Relay Boost ({'เจอจอ' if got else 'timeout เดาแตะ'})")
                 time.sleep(0.6)
+    except Stopped:
+        status = "stopped"
     finally:
         # ปล่อยเฉพาะสไลด์ที่อาจค้าง — อย่า touch_up จุดกระโดด (ทำให้กระโดดซ้ำ)
         adb.touch_up(*_point("slide"))
 
     if verbose:
-        if status == "game_over":
+        if status == "stopped":
+            print("[play] หยุด pattern (สั่งหยุดจากแอป)")
+        elif status == "game_over":
             print("[play] หยุด pattern กลางคัน (จบเกม)")
         else:
             print("[play] จบ pattern")
     return status
 
 
-def _wait_for(adb, pred, timeout=10.0, interval=0.2) -> bool:
+def _wait_for(adb, pred, timeout=10.0, interval=0.2,
+              stop_event: threading.Event | None = None) -> bool:
     t0 = time.time()
     while time.time() - t0 < timeout:
+        if _stopped(stop_event):
+            return False
         try:
             if pred(adb.screencap()):
                 return True
@@ -666,18 +724,23 @@ def main():
     if args.cmd == "record":
         record_pattern(adb, args.name, wait_anchor=not args.no_wait)
     elif args.cmd == "play":
+        from runtime import init_features, feature_enabled
+        init_features()
         if not getattr(args, "no_prep", False):
-            from auto_lobby import is_in_game, prepare_double_coins
+            from auto_lobby import is_in_game, prepare_for_run
             try:
                 if not is_in_game(adb.screencap()):
-                    print("[play] ยังไม่อยู่ในด่าน -> เตรียม Double Coins + กด Play")
-                    prepare_double_coins(adb, want_play=True)
+                    print("[play] ยังไม่อยู่ในด่าน -> เตรียม lobby + กด Play")
+                    prepare_for_run(adb, want_play=True,
+                                    use_double_coins=feature_enabled("double_coins"))
                     time.sleep(2.5)
             except Exception as e:
                 print(f"[play] เตรียม lobby ล้มเหลว: {e}")
         play_pattern(adb, args.name, lead_ms=args.lead,
                      jump_gap_ms=getattr(args, "jump_gap", None),
-                     wait_anchor=not args.no_wait)
+                     wait_anchor=not args.no_wait,
+                     watch_relay=feature_enabled("relay_boost"),
+                     watch_surprise=feature_enabled("surprise_card"))
 
 
 if __name__ == "__main__":

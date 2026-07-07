@@ -190,6 +190,9 @@ class CookieRunApp(ctk.CTk):
         lead_row.grid(row=1, column=1, sticky="w", padx=PAD, pady=8)
         self._ctl_lead = ctk.CTkEntry(lead_row, width=80, font=FONT_BODY)
         self._ctl_lead.pack(side="left")
+        self._ctl_lead.bind("<KeyRelease>", lambda _e: self._push_live_lead(False))
+        self._ctl_lead.bind("<FocusOut>", lambda _e: self._push_live_lead(True))
+        self._ctl_lead.bind("<Return>", lambda _e: self._push_live_lead(True))
         ctk.CTkLabel(lead_row, text="  ลบ=ช้าลง  บวก=เร็วขึ้น",
                      font=FONT_SMALL, text_color=COLORS["muted"]).pack(side="left", padx=8)
 
@@ -201,8 +204,23 @@ class CookieRunApp(ctk.CTk):
         ctk.CTkLabel(gap_row, text="  0=เล่นเป๊ะ  เพิ่มถ้า double jump",
                      font=FONT_SMALL, text_color=COLORS["muted"]).pack(side="left", padx=8)
 
+        feat_fr = ctk.CTkFrame(box, fg_color="transparent")
+        feat_fr.grid(row=3, column=0, columnspan=2, sticky="w", padx=PAD, pady=(0, 4))
+        ctk.CTkLabel(feat_fr, text="ฟีเจอร์อัตโนมัติ", font=FONT_BODY).pack(anchor="w", pady=(0, 4))
+        self._feat_vars: dict[str, ctk.BooleanVar] = {}
+        for key, label in (
+            ("double_coins", "สุ่ม Double Coins ก่อนเล่น"),
+            ("surprise_card", "แก้มินิเกมการ์ด"),
+            ("relay_boost", "Cookie Relay Boost"),
+            ("post_game", "หลังจบด่าน (OK / Result / กล่อง)"),
+        ):
+            var = ctk.BooleanVar(value=True)
+            self._feat_vars[key] = var
+            ctk.CTkCheckBox(feat_fr, text=label, variable=var, font=FONT_SMALL,
+                            command=self._on_feat_toggle).pack(anchor="w", pady=1)
+
         preset_row = ctk.CTkFrame(box, fg_color="transparent")
-        preset_row.grid(row=3, column=0, columnspan=2, sticky="w", padx=PAD, pady=(0, 8))
+        preset_row.grid(row=4, column=0, columnspan=2, sticky="w", padx=PAD, pady=(0, 8))
         ctk.CTkLabel(preset_row, text="โหมดจังหวะ", font=FONT_BODY).pack(side="left", padx=(0, 8))
         ctk.CTkButton(preset_row, text="เป๊ะ", width=90,
                       command=lambda: self._apply_timing_preset("faithful"),
@@ -212,7 +230,7 @@ class CookieRunApp(ctk.CTk):
                       fg_color=COLORS["card_hover"]).pack(side="left", padx=4)
 
         btns = ctk.CTkFrame(box, fg_color="transparent")
-        btns.grid(row=4, column=0, columnspan=2, padx=PAD, pady=PAD, sticky="ew")
+        btns.grid(row=5, column=0, columnspan=2, padx=PAD, pady=PAD, sticky="ew")
         for text, cmd, color in (
             ("▶  เล่นวน (Loop)", self._start_loop, COLORS["accent"]),
             ("▶  เล่น 1 รอบ", self._start_once, COLORS["card_hover"]),
@@ -374,6 +392,11 @@ class CookieRunApp(ctk.CTk):
             if k in self._set_vars:
                 self._set_vars[k].set(v)
         self._var_auto_up.set(self._cfg.get("auto_check_update", True))
+        feats = self._cfg.get("features", {})
+        for key, var in self._feat_vars.items():
+            var.set(feats.get(key, True))
+        from runtime import init_features
+        init_features({k: var.get() for k, var in self._feat_vars.items()})
         self._update_pattern_card(pat)
 
     def _gather_settings(self) -> dict:
@@ -402,6 +425,7 @@ class CookieRunApp(ctk.CTk):
             data["jump_min_gap_ms"] = 0
         data["timing_preset"] = getattr(self, "_timing_preset", "faithful")
         data["auto_check_update"] = self._var_auto_up.get()
+        data["features"] = {k: var.get() for k, var in self._feat_vars.items()}
         return data
 
     def _save_settings(self):
@@ -560,9 +584,28 @@ class CookieRunApp(ctk.CTk):
             self._set_vars["ADB_PATH"].set(p)
 
     # ------------------------------------------------------------------ bot
+    def _on_feat_toggle(self):
+        from runtime import set_feature
+        for key, var in self._feat_vars.items():
+            set_feature(key, var.get())
+        self._save_quiet()
+
+    def _push_live_lead(self, log_change: bool = False) -> None:
+        from runtime import set_live_lead
+        try:
+            lead = int(self._ctl_lead.get().strip())
+        except ValueError:
+            return
+        set_live_lead(lead)
+        if log_change and self._bot.running:
+            self._log(f"[live] lead -> {lead} ms")
+
     def _start_bot(self, args: list[str]):
         try:
             self._save_quiet()
+            self._push_live_lead()
+            from runtime import init_features
+            init_features({k: var.get() for k, var in self._feat_vars.items()})
             self._show_page("control")
             self._bot.start(args, log=self._log, on_done=self._on_bot_done)
             self._set_bot_status(True)
@@ -570,6 +613,8 @@ class CookieRunApp(ctk.CTk):
             messagebox.showwarning("กำลังรัน", str(e))
 
     def _on_bot_done(self):
+        from runtime import set_live_lead
+        set_live_lead(None)
         self.after(0, lambda: self._set_bot_status(False))
 
     def _set_bot_status(self, running: bool):
@@ -591,6 +636,7 @@ class CookieRunApp(ctk.CTk):
         self._ctl_lead.insert(0, lead)
         self._ctl_jump_gap.delete(0, "end")
         self._ctl_jump_gap.insert(0, gap)
+        self._push_live_lead()
         if save:
             self._save_quiet()
             self._log(f"[timing] โหมด: {'เป๊ะ' if preset == 'faithful' else 'กัน double jump'}")

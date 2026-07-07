@@ -4,6 +4,7 @@
 
 ระหว่างเล่นยังจัดการหน้าจอพิเศษให้ด้วย:
   - "Tap to activate Cookie Relay Boost!" -> แตะกลางจอ
+  - ปุ่ม OK (Result / popup ทั่วไป)       -> กดเสมอ
   - หน้า Result (จบเกม)                    -> กด OK (และเริ่มใหม่ถ้าใส่ --loop)
 
 ใช้งาน:
@@ -35,11 +36,13 @@ from settings import apply_user_settings
 from adb_controller import ADBController
 from detector import build_detector, crop, roi_to_pixels
 from auto_lobby import (
-    RELAY_TAP, RESULT_OK, POST_GAME_BTN, is_relay_boost, is_result,
+    RELAY_TAP, POST_GAME_BTN, is_relay_boost, is_result,
     is_lobby, is_buy, is_in_game, is_mystery_box, is_confirm,
-    prepare_double_coins,
+    is_ok_btn, ok_btn_tap, prepare_for_run,
 )
+from surprise_card import is_surprise_card, handle_surprise_card
 from pattern import record_pattern, play_pattern
+from runtime import set_live_lead, init_features, feature_enabled
 
 
 def draw_debug(img, result):
@@ -85,6 +88,14 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="ยิง action ของ pattern เร็วขึ้นกี่ ms (ชดเชย lag)")
     parser.add_argument("--jump-gap", type=int, default=None,
                         help="ระยะห่างขั้นต่ำระหว่างกระโดด (ms) กัน double jump (ค่าเริ่มต้นจาก settings)")
+    parser.add_argument("--no-double-coins", action="store_true",
+                        help="ไม่สุ่ม Double Coins ก่อนเล่น")
+    parser.add_argument("--no-surprise-card", action="store_true",
+                        help="ไม่แก้มินิเกม Surprise Card")
+    parser.add_argument("--no-relay", action="store_true",
+                        help="ไม่แตะ Cookie Relay Boost")
+    parser.add_argument("--no-post-game", action="store_true",
+                        help="ไม่กด OK/Result/Mystery Box หลังจบด่าน")
     return parser
 
 
@@ -95,6 +106,18 @@ def run_bot_from_argv(argv: list[str], stop_event: threading.Event | None = None
     jump_gap = args.jump_gap
     if jump_gap is None:
         jump_gap = getattr(config, "JUMP_MIN_GAP_MS", 0)
+
+    set_live_lead(args.lead)
+    cli_feats: dict[str, bool] = {}
+    if args.no_double_coins:
+        cli_feats["double_coins"] = False
+    if args.no_surprise_card:
+        cli_feats["surprise_card"] = False
+    if args.no_relay:
+        cli_feats["relay_boost"] = False
+    if args.no_post_game:
+        cli_feats["post_game"] = False
+    init_features(cli_feats or None)
 
     adb = ADBController()
     if not adb.connect():
@@ -108,22 +131,28 @@ def run_bot_from_argv(argv: list[str], stop_event: threading.Event | None = None
         # --play-pattern + --loop = เล่นวนครบวงจร (รวมจบเกมกลับ lobby)
         args.pattern = args.play_pattern
     elif args.play_pattern:
-        if not args.no_prep:
+        if not args.no_prep and not (stop_event is not None and stop_event.is_set()):
             try:
                 if not is_in_game(adb.screencap()):
-                    print("[bot] ยังไม่อยู่ในด่าน -> เตรียม Double Coins + กด Play")
-                    prepare_double_coins(adb, want_play=True)
+                    print("[bot] ยังไม่อยู่ในด่าน -> เตรียม lobby + กด Play")
+                    prepare_for_run(adb, want_play=True,
+                                    use_double_coins=feature_enabled("double_coins"),
+                                    stop_event=stop_event)
                     time.sleep(2.5)
             except Exception as e:  # noqa: BLE001
                 print(f"[bot] เตรียม lobby ล้มเหลว: {e}")
         status = play_pattern(adb, args.play_pattern, lead_ms=args.lead,
-                              jump_gap_ms=jump_gap, watch_relay=True)
-        if status == "game_over":
+                              jump_gap_ms=jump_gap,
+                              watch_relay=feature_enabled("relay_boost"),
+                              watch_surprise=feature_enabled("surprise_card"),
+                              stop_event=stop_event)
+        if status == "game_over" and feature_enabled("post_game"):
             try:
                 time.sleep(0.8)
-                if is_result(adb.screencap()):
-                    print("[bot] หน้า Result -> กด OK")
-                    adb.tap(*RESULT_OK)
+                cap = adb.screencap()
+                if is_result(cap) or is_ok_btn(cap):
+                    print("[bot] หน้า Result / ปุ่ม OK -> กด OK")
+                    adb.tap(*ok_btn_tap(cap))
             except Exception:
                 pass
         return
@@ -161,20 +190,32 @@ def run_bot_from_argv(argv: list[str], stop_event: threading.Event | None = None
             # --- จัดการหน้าจอพิเศษ (เมนู/จบเกม/บูสต์) ---
             handled = False
             if now - last_screen_t >= SCREEN_COOLDOWN:
-                if is_result(img):
+                if feature_enabled("post_game") and is_result(img):
                     last_screen_t = now
                     handled = True
                     print("[bot] หน้า Result (จบเกม) -> กด OK")
-                    adb.tap(*RESULT_OK)
+                    adb.tap(*ok_btn_tap(img))
                     time.sleep(1.2)
                     if not args.loop:
                         print("[bot] จบเกมแล้ว (ใส่ --loop เพื่อเล่นวนอัตโนมัติ)")
-                elif is_relay_boost(img):
+                elif feature_enabled("post_game") and is_ok_btn(img):
+                    last_screen_t = now
+                    handled = True
+                    print("[bot] เจอปุ่ม OK -> กด")
+                    adb.tap(*ok_btn_tap(img))
+                    time.sleep(0.8)
+                elif feature_enabled("surprise_card") and not (is_lobby(img) or is_buy(img)) and is_surprise_card(img):
+                    last_screen_t = now
+                    handled = True
+                    print("[bot] Surprise Card minigame -> แก้อัตโนมัติ")
+                    handle_surprise_card(adb, img)
+                    time.sleep(0.5)
+                elif feature_enabled("relay_boost") and is_relay_boost(img):
                     last_screen_t = now
                     handled = True
                     print("[bot] Cookie Relay Boost! -> แตะกลางจอ")
                     adb.tap(*RELAY_TAP)
-                elif is_mystery_box(img) or is_confirm(img):
+                elif feature_enabled("post_game") and (is_mystery_box(img) or is_confirm(img)):
                     last_screen_t = now
                     handled = True
                     print("[bot] Mystery Box / Confirm -> กดปุ่มกลางล่าง")
@@ -183,8 +224,15 @@ def run_bot_from_argv(argv: list[str], stop_event: threading.Event | None = None
                 elif args.loop and (is_lobby(img) or is_buy(img)):
                     last_screen_t = now
                     handled = True
-                    print("[bot] --loop: อยู่หน้าเมนู -> เตรียม Double Coins แล้วเริ่มด่านใหม่")
-                    prepare_double_coins(adb, want_play=True)
+                    if feature_enabled("double_coins"):
+                        print("[bot] --loop: อยู่หน้าเมนู -> เตรียม Double Coins แล้วเริ่มด่านใหม่")
+                    else:
+                        print("[bot] --loop: อยู่หน้าเมนู -> กด Play (ข้าม Double Coins)")
+                    prepare_for_run(adb, want_play=True,
+                                    use_double_coins=feature_enabled("double_coins"),
+                                    stop_event=stop_event)
+                    if stop_event is not None and stop_event.is_set():
+                        break
                     time.sleep(3.0)
 
             if handled:
@@ -200,8 +248,14 @@ def run_bot_from_argv(argv: list[str], stop_event: threading.Event | None = None
                     print(f"[bot] เข้าด่าน -> เล่นตาม pattern '{args.pattern}' (lead={args.lead}ms)")
                     status = play_pattern(adb, args.pattern, lead_ms=args.lead,
                                           jump_gap_ms=jump_gap,
-                                          wait_anchor=False, verbose=True)
+                                          wait_anchor=False, verbose=True,
+                                          watch_relay=feature_enabled("relay_boost"),
+                                          watch_surprise=feature_enabled("surprise_card"),
+                                          stop_event=stop_event)
                     prev_jump = prev_slide = False
+                    if status == "stopped":
+                        # ผู้ใช้กดหยุด -> ออกจากลูปหลักทันที
+                        break
                     if status == "game_over":
                         # pattern หยุดกลางคัน -> ลูปจัดการ Result/กล่อง/lobby ต่อ
                         continue
@@ -235,11 +289,21 @@ def run_bot_from_argv(argv: list[str], stop_event: threading.Event | None = None
             else:
                 # --- ไม่ใช่หน้าที่รู้จัก และไม่ได้อยู่ในด่าน ---
                 prev_jump = prev_slide = False
+                # มินิเกมการ์ดบังปุ่ม Jump -> is_in_game เป็น False แต่ต้องแก้การ์ด
+                if feature_enabled("surprise_card") and not (is_lobby(img) or is_buy(img)) and is_surprise_card(img):
+                    print("[bot] Surprise Card (หน้าจอพิเศษ) -> แก้อัตโนมัติ")
+                    handle_surprise_card(adb, img)
+                    unknown_since = 0.0
+                    time.sleep(0.5)
+                    continue
                 if args.loop:
                     if unknown_since == 0.0:
                         unknown_since = now
                     elif now - unknown_since > 4.0:
-                        # ค้างหน้าจอแปลกนานเกินไป -> กด Back กู้คืน
+                        # อย่ากด Back ถ้าน่าจะเป็นมินิเกมการ์ด (กันกดพลาดออกจากเกม)
+                        if feature_enabled("surprise_card") and not (is_lobby(img) or is_buy(img)) and is_surprise_card(img):
+                            unknown_since = 0.0
+                            continue
                         print("[bot] หน้าจอไม่รู้จักค้างนาน -> กด Back กู้คืน")
                         adb.back()
                         time.sleep(1.0)

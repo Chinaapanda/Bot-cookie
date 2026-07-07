@@ -14,6 +14,7 @@ USER_KEYS = (
     "ROI_JUMP", "ROI_SLIDE", "ROI_PLAYER",
     "TARGET_FPS", "CAPTURE_RAW", "DETECT_METHOD", "MOTION_THRESHOLD",
     "default_pattern", "default_lead", "jump_min_gap_ms", "timing_preset", "auto_check_update",
+    "features",
 )
 
 
@@ -80,6 +81,12 @@ def to_dict() -> dict:
         "jump_min_gap_ms": 0,
         "timing_preset": "faithful",
         "auto_check_update": True,
+        "features": {
+            "double_coins": True,
+            "surprise_card": True,
+            "relay_boost": True,
+            "post_game": True,
+        },
     }
     defaults.update(data)
     return defaults
