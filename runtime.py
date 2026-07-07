@@ -6,6 +6,7 @@ import time
 
 _lock = threading.Lock()
 _lead_ms: int | None = None
+_anchor_s: float | None = None  # None = ใช้ค่าจากไฟล์ pattern
 
 FEATURE_DEFAULTS: dict[str, bool] = {
     "double_coins": True,    # สุ่ม Multi-Buy หา Double Coins ก่อนเล่น
@@ -41,6 +42,19 @@ def get_live_lead_ms(fallback: int) -> int:
     """คืน lead ปัจจุบัน (ms) — อ่านก่อนทุกจังหวะ pattern"""
     with _lock:
         return _lead_ms if _lead_ms is not None else fallback
+
+
+def set_live_anchor(seconds: float | None) -> None:
+    """ตั้ง anchor (วินาที) สด — None = ใช้ค่าจากไฟล์ pattern"""
+    global _anchor_s
+    with _lock:
+        _anchor_s = seconds
+
+
+def get_live_anchor_s(pattern_anchor: float) -> float:
+    """คืน anchor ปัจจุบัน (วินาที) — อ่านก่อนเริ่มเล่น pattern"""
+    with _lock:
+        return _anchor_s if _anchor_s is not None else pattern_anchor
 
 
 def init_features(overrides: dict[str, bool] | None = None) -> None:

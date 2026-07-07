@@ -182,7 +182,8 @@ class CookieRunApp(ctk.CTk):
         box.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(box, text="Pattern", font=FONT_BODY).grid(row=0, column=0, padx=PAD, pady=12, sticky="w")
-        self._ctl_pattern = ctk.CTkComboBox(box, values=["EP1"], width=200, font=FONT_BODY)
+        self._ctl_pattern = ctk.CTkComboBox(box, values=["EP1"], width=200, font=FONT_BODY,
+                                            command=self._on_pattern_pick)
         self._ctl_pattern.grid(row=0, column=1, padx=PAD, pady=12, sticky="w")
 
         ctk.CTkLabel(box, text="Lead (ms)", font=FONT_BODY).grid(row=1, column=0, padx=PAD, pady=8, sticky="w")
@@ -204,8 +205,19 @@ class CookieRunApp(ctk.CTk):
         ctk.CTkLabel(gap_row, text="  0=เล่นเป๊ะ  เพิ่มถ้า double jump",
                      font=FONT_SMALL, text_color=COLORS["muted"]).pack(side="left", padx=8)
 
+        ctk.CTkLabel(box, text="Anchor (s)", font=FONT_BODY).grid(row=3, column=0, padx=PAD, pady=8, sticky="w")
+        anchor_row = ctk.CTkFrame(box, fg_color="transparent")
+        anchor_row.grid(row=3, column=1, sticky="w", padx=PAD, pady=8)
+        self._ctl_anchor = ctk.CTkEntry(anchor_row, width=80, font=FONT_BODY)
+        self._ctl_anchor.pack(side="left")
+        self._ctl_anchor.bind("<KeyRelease>", lambda _e: self._push_live_anchor(False))
+        self._ctl_anchor.bind("<FocusOut>", lambda _e: self._push_live_anchor(True))
+        self._ctl_anchor.bind("<Return>", lambda _e: self._push_live_anchor(True))
+        ctk.CTkLabel(anchor_row, text="  รอก่อนกดครั้งแรก (ว่าง=ตามไฟล์)",
+                     font=FONT_SMALL, text_color=COLORS["muted"]).pack(side="left", padx=8)
+
         feat_fr = ctk.CTkFrame(box, fg_color="transparent")
-        feat_fr.grid(row=3, column=0, columnspan=2, sticky="w", padx=PAD, pady=(0, 4))
+        feat_fr.grid(row=4, column=0, columnspan=2, sticky="w", padx=PAD, pady=(0, 4))
         ctk.CTkLabel(feat_fr, text="ฟีเจอร์อัตโนมัติ", font=FONT_BODY).pack(anchor="w", pady=(0, 4))
         self._feat_vars: dict[str, ctk.BooleanVar] = {}
         for key, label in (
@@ -220,7 +232,7 @@ class CookieRunApp(ctk.CTk):
                             command=self._on_feat_toggle).pack(anchor="w", pady=1)
 
         preset_row = ctk.CTkFrame(box, fg_color="transparent")
-        preset_row.grid(row=4, column=0, columnspan=2, sticky="w", padx=PAD, pady=(0, 8))
+        preset_row.grid(row=5, column=0, columnspan=2, sticky="w", padx=PAD, pady=(0, 8))
         ctk.CTkLabel(preset_row, text="โหมดจังหวะ", font=FONT_BODY).pack(side="left", padx=(0, 8))
         ctk.CTkButton(preset_row, text="เป๊ะ", width=90,
                       command=lambda: self._apply_timing_preset("faithful"),
@@ -230,7 +242,7 @@ class CookieRunApp(ctk.CTk):
                       fg_color=COLORS["card_hover"]).pack(side="left", padx=4)
 
         btns = ctk.CTkFrame(box, fg_color="transparent")
-        btns.grid(row=5, column=0, columnspan=2, padx=PAD, pady=PAD, sticky="ew")
+        btns.grid(row=6, column=0, columnspan=2, padx=PAD, pady=PAD, sticky="ew")
         for text, cmd, color in (
             ("▶  เล่นวน (Loop)", self._start_loop, COLORS["accent"]),
             ("▶  เล่น 1 รอบ", self._start_once, COLORS["card_hover"]),
@@ -378,6 +390,7 @@ class CookieRunApp(ctk.CTk):
         self._ctl_lead.insert(0, str(self._cfg.get("default_lead", 0)))
         self._ctl_jump_gap.delete(0, "end")
         self._ctl_jump_gap.insert(0, str(self._cfg.get("jump_min_gap_ms", 0)))
+        self._fill_anchor_field(pat)
         self._timing_preset = self._cfg.get("timing_preset", "faithful")
 
         tap = f"{self._cfg.get('TAP_X', 244)},{self._cfg.get('TAP_Y', 937)}"
@@ -423,6 +436,14 @@ class CookieRunApp(ctk.CTk):
             data["jump_min_gap_ms"] = int(self._ctl_jump_gap.get().strip())
         except ValueError:
             data["jump_min_gap_ms"] = 0
+        anchor_raw = self._ctl_anchor.get().strip()
+        if anchor_raw:
+            try:
+                data["anchor_override"] = float(anchor_raw)
+            except ValueError:
+                pass
+        elif "anchor_override" in data:
+            del data["anchor_override"]
         data["timing_preset"] = getattr(self, "_timing_preset", "faithful")
         data["auto_check_update"] = self._var_auto_up.get()
         data["features"] = {k: var.get() for k, var in self._feat_vars.items()}
@@ -560,6 +581,7 @@ class CookieRunApp(ctk.CTk):
         self._pat_name.delete(0, "end")
         self._pat_name.insert(0, name)
         self._ctl_pattern.set(name)
+        self._fill_anchor_field(name)
         self._update_pattern_card(name)
         self._show_page("control")
 
@@ -584,6 +606,42 @@ class CookieRunApp(ctk.CTk):
             self._set_vars["ADB_PATH"].set(p)
 
     # ------------------------------------------------------------------ bot
+    def _on_pattern_pick(self, _choice: str = ""):
+        self._fill_anchor_field(self._ctl_pattern.get().strip())
+
+    def _fill_anchor_field(self, pattern_name: str) -> None:
+        """เติม anchor จากไฟล์ pattern (หรือค่าที่เซฟไว้)"""
+        from pattern import pattern_anchor_s
+        override = self._cfg.get("anchor_override")
+        if override is not None:
+            val = str(override)
+        elif pattern_name:
+            try:
+                val = f"{pattern_anchor_s(pattern_name):.2f}"
+            except (FileNotFoundError, OSError, ValueError, KeyError):
+                val = ""
+        else:
+            val = ""
+        self._ctl_anchor.delete(0, "end")
+        self._ctl_anchor.insert(0, val)
+        self._push_live_anchor(False)
+
+    def _push_live_anchor(self, log_change: bool = False) -> None:
+        from runtime import set_live_anchor
+        raw = self._ctl_anchor.get().strip()
+        if not raw:
+            set_live_anchor(None)
+            if log_change and self._bot.running:
+                self._log("[live] anchor -> ตามไฟล์ pattern")
+            return
+        try:
+            anchor = float(raw)
+        except ValueError:
+            return
+        set_live_anchor(anchor)
+        if log_change and self._bot.running:
+            self._log(f"[live] anchor -> {anchor:.2f}s")
+
     def _on_feat_toggle(self):
         from runtime import set_feature
         for key, var in self._feat_vars.items():
@@ -604,6 +662,7 @@ class CookieRunApp(ctk.CTk):
         try:
             self._save_quiet()
             self._push_live_lead()
+            self._push_live_anchor()
             from runtime import init_features
             init_features({k: var.get() for k, var in self._feat_vars.items()})
             self._show_page("control")
@@ -613,8 +672,9 @@ class CookieRunApp(ctk.CTk):
             messagebox.showwarning("กำลังรัน", str(e))
 
     def _on_bot_done(self):
-        from runtime import set_live_lead
+        from runtime import set_live_lead, set_live_anchor
         set_live_lead(None)
+        set_live_anchor(None)
         self.after(0, lambda: self._set_bot_status(False))
 
     def _set_bot_status(self, running: bool):
@@ -645,13 +705,21 @@ class CookieRunApp(ctk.CTk):
         p = self._ctl_pattern.get().strip()
         lead = self._ctl_lead.get().strip() or "0"
         gap = self._ctl_jump_gap.get().strip() or "0"
-        self._start_bot(["--loop", "--pattern", p, "--lead", lead, "--jump-gap", gap])
+        anchor = self._ctl_anchor.get().strip()
+        args = ["--loop", "--pattern", p, "--lead", lead, "--jump-gap", gap]
+        if anchor:
+            args.extend(["--anchor", anchor])
+        self._start_bot(args)
 
     def _start_once(self):
         p = self._ctl_pattern.get().strip()
         lead = self._ctl_lead.get().strip() or "0"
         gap = self._ctl_jump_gap.get().strip() or "0"
-        self._start_bot(["--play-pattern", p, "--lead", lead, "--jump-gap", gap])
+        anchor = self._ctl_anchor.get().strip()
+        args = ["--play-pattern", p, "--lead", lead, "--jump-gap", gap]
+        if anchor:
+            args.extend(["--anchor", anchor])
+        self._start_bot(args)
 
     def _start_record(self):
         self._start_bot(["--record", self._ctl_pattern.get().strip()])

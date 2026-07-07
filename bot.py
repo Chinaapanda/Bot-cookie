@@ -42,7 +42,7 @@ from auto_lobby import (
 )
 from surprise_card import is_surprise_card, handle_surprise_card
 from pattern import record_pattern, play_pattern
-from runtime import set_live_lead, init_features, feature_enabled
+from runtime import set_live_lead, set_live_anchor, init_features, feature_enabled
 
 
 def draw_debug(img, result):
@@ -86,6 +86,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="ใช้ pattern นี้เล่นช่วงอยู่ในด่าน (แทนการ react สด) -- ใช้คู่กับ --loop ได้")
     parser.add_argument("--lead", type=int, default=0,
                         help="ยิง action ของ pattern เร็วขึ้นกี่ ms (ชดเชย lag)")
+    parser.add_argument("--anchor", type=float, default=None,
+                        help="รอก่อนจังหวะแรก (วินาที) แทนค่าในไฟล์ pattern")
     parser.add_argument("--jump-gap", type=int, default=None,
                         help="ระยะห่างขั้นต่ำระหว่างกระโดด (ms) กัน double jump (ค่าเริ่มต้นจาก settings)")
     parser.add_argument("--no-double-coins", action="store_true",
@@ -108,6 +110,7 @@ def run_bot_from_argv(argv: list[str], stop_event: threading.Event | None = None
         jump_gap = getattr(config, "JUMP_MIN_GAP_MS", 0)
 
     set_live_lead(args.lead)
+    set_live_anchor(args.anchor)
     cli_feats: dict[str, bool] = {}
     if args.no_double_coins:
         cli_feats["double_coins"] = False
